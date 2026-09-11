@@ -7,3 +7,4 @@ __pycache__/
 .DS_Store
 cookies.txt
 body_01_trf1.html
+fixtures/_contador.txt

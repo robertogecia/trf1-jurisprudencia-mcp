@@ -1231,7 +1231,15 @@ async def _consultar_portal(consulta: str, tipos: list[str], fontes: list[str], 
             total = _extrair_total(html_form)
             html_docs = html_form
             first = (pagina - 1) * por_pagina
-            if first > 0 or por_pagina != 30:
+            # Zero resultado de verdade (nenhum "doc_" na própria página 1, total também 0):
+            # nenhuma outra página vai trazer nada — não vale gastar uma requisição de
+            # paginação nem confundir com o aviso de "total não informado" (achado real
+            # 11/09/2026: com por_pagina!=30 e busca genuinamente vazia, a ferramenta pagava
+            # uma requisição a mais e emitia dois avisos para um resultado que era só zero).
+            zero_de_verdade = not total and not _RE_DOC_SPLIT.search(html_form)
+            if zero_de_verdade:
+                html_docs = html_form
+            elif first > 0 or por_pagina != 30:
                 if not total:
                     avisos.append("o portal não informou o total desta consulta — a paginação pode estar imprecisa")
                 if total and first >= total:
@@ -1433,9 +1441,12 @@ async def _localizar_por_numero(numero: str, base: str, operacao: str, com_intei
     else:
         dados = await _consultar_portal(digitos, BASES[base]["tipos"], [], 1, 50, {}, "julgamento", operacao, base)
     docs = _filtrar_por_numero(dados["docs"], digitos)
-    if docs and com_inteiro_teor and base == "tnu":
-        dados["avisos"] = (dados.get("avisos") or []) + await _anexar_inteiro_teor_tnu(docs, operacao)
-    return dados, docs
+    # NUNCA mutar `dados` (é o dict guardado no cache — a mesma chamada repetida na mesma
+    # janela de 5 min devolve o MESMO objeto; mutar em local duplicava avisos a cada chamada,
+    # achado real 11/09/2026). Devolve um dict NOVO com os avisos combinados.
+    avisos_extra = await _anexar_inteiro_teor_tnu(docs, operacao) if (docs and com_inteiro_teor and base == "tnu") else []
+    resultado = {"total": dados["total"], "docs": dados["docs"], "avisos": list(dados.get("avisos") or []) + avisos_extra}
+    return resultado, docs
 
 
 async def _obter_decisao(numero: str, base: str = "trf1") -> str:
@@ -1447,7 +1458,7 @@ async def _obter_decisao(numero: str, base: str = "trf1") -> str:
         dados, docs = await _localizar_por_numero(numero, base, "decisao")
         if not docs and dados["docs"]:
             docs = dados["docs"]
-            dados["avisos"] = (dados.get("avisos") or []) + ["o portal devolveu documentos cujo número não bate exatamente — confira"]
+            dados = {**dados, "avisos": list(dados.get("avisos") or []) + ["o portal devolveu documentos cujo número não bate exatamente — confira"]}
     except (ValueError, RuntimeError) as e:
         return f"Erro na consulta ao TRF1: {e}"
     except Exception as e:
@@ -1788,6 +1799,29 @@ if __name__ == "__main__":
         assert "Inteiro teor (literal, eproc da TNU)" in sd and "inteiro teor lido" in sd, sd[-400:]
         sd2 = _format_decisao([docs_col[0]], docs_col[0]["numero"], 1)
         assert "embutido no portal" in sd2
+        # achado real 11/09/2026: busca genuinamente vazia (0 docs, sem rowCount/contador) com
+        # por_pagina!=30 não deve gastar requisição de paginação nem emitir aviso de "total não
+        # informado" — confere só as funções puras (o fluxo de rede é testado ao vivo)
+        html_vazio_de_verdade = '<div id="formulario:tabelaDocumentos" class="ui-datagrid ui-widget"></div>'
+        assert not _RE_DOC_SPLIT.search(html_vazio_de_verdade) and _extrair_total(html_vazio_de_verdade) == 0
+        zero_de_verdade = not _extrair_total(html_vazio_de_verdade) and not _RE_DOC_SPLIT.search(html_vazio_de_verdade)
+        assert zero_de_verdade is True
+
+        # achado real 11/09/2026: chamar _localizar_por_numero 2x para o MESMO número (mesmo
+        # cache) não pode duplicar avisos — o dict do cache nunca é mutado no lugar
+        async def _consultar_fake(*a, **kw):
+            return {"total": 1, "docs": [dict(d0, numero_digitos=d0["numero_digitos"])], "avisos": ["aviso original"]}
+        async def _anexar_fake(docs, operacao):
+            return ["teto por chamada"]
+        _orig_consultar, _orig_anexar = _consultar_portal, _anexar_inteiro_teor_tnu
+        globals()["_consultar_portal"], globals()["_anexar_inteiro_teor_tnu"] = _consultar_fake, _anexar_fake
+        try:
+            d1, _ = asyncio.run(_localizar_por_numero(d0["numero"], "tnu", "x"))
+            d2, _ = asyncio.run(_localizar_por_numero(d0["numero"], "tnu", "x"))
+            assert d1["avisos"] == ["aviso original", "teto por chamada"], d1["avisos"]
+            assert d2["avisos"] == ["aviso original", "teto por chamada"], d2["avisos"]  # não duplicou
+        finally:
+            globals()["_consultar_portal"], globals()["_anexar_inteiro_teor_tnu"] = _orig_consultar, _orig_anexar
         # verificar_trecho
         vt = {"ementa": "A TESE fixada: «benefício» por incapacidade, art. 42.", "dispositivo": "negar provimento"}
         assert _verificar_trecho(vt, "tese fixada: beneficio por incapacidade")["valido"]

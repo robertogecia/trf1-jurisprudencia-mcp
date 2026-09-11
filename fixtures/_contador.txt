@@ -1,0 +1,9 @@
+n,url,status,content-type,size
+1,https://jurisprudencia.cjf.jus.br/trf1,302,(none)/0-body,0
+2,https://jurisprudencia.cjf.jus.br/trf1/index.xhtml,200,text/html;charset=UTF-8,16685
+3,POST https://jurisprudencia.cjf.jus.br/trf1/index.xhtml (busca dano moral ACORDAO/TRF1),200,text/xml;charset=UTF-8,367746
+4,POST https://jurisprudencia.cjf.jus.br/trf1/index.xhtml (busca prescricao reusing old ViewState),200,text/xml;charset=UTF-8,420938
+5,POST https://jurisprudencia.cjf.jus.br/trf1/index.xhtml (paginacao tabelaDocumentos page2),200,text/xml;charset=UTF-8,356466
+6,POST https://jurisprudencia.cjf.jus.br/trf1/index.xhtml (toggle ckbAvancada),200,text/xml;charset=UTF-8,8095
+7,https://jurisprudencia.cjf.jus.br/ajuda.xhtml,200,text/html;charset=UTF-8,19100
+8,https://arquivo.trf1.jus.br/PesquisaMenuArquivo.asp?p1=00013691720174013606,403,text/html;charset=UTF-8 (Cloudflare challenge),5843

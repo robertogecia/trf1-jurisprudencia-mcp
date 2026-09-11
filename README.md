@@ -56,6 +56,14 @@ Red team adversarial de 11/09/2026 (Opus, offline): 12 achados, todos corrigidos
 `--selftest` — relatório em `references/red-team-2026-09-11.md`. Hipóteses que só teste online
 resolve (total com dois tipos marcados; `por_pagina=50` de fato honrado): registradas lá.
 
+**`por_pagina=50` sem filtro pode estourar o limite de saída de quem chama** (achado real
+11/09/2026: "dano moral" sem data/órgão/relator, 50 por página, 88 mil caracteres de resposta) —
+use 50 só junto de um filtro que já reduza o total. Nos testes ao vivo do mesmo dia: dois bugs
+achados no PRIMEIRO uso real pós-registro (busca vazia com `por_pagina≠30` gastava uma requisição
+de paginação à toa; `obter_decisao`+`verificar_citacao` no mesmo número duplicava um aviso por
+mutar o dict do cache) — ambos corrigidos com regressão. `colegiado` confirmado: registros
+administrativos antigos legitimamente não têm inteiro teor nem dispositivo (não é bug de parser).
+
 ## Instalação (pessoal)
 
 ```bash

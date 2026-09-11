@@ -1579,7 +1579,11 @@ try:
             data_fim: Fim do período (mesmos formatos).
             tipo_data: A que data o período se refere: "julgamento" (padrão) ou "publicacao".
             pagina: Página de resultados (1+).
-            por_pagina: 10, 30 (padrão) ou 50 — os valores que o portal aceita.
+            por_pagina: 10, 30 (padrão) ou 50 — os valores que o portal aceita. Use 50 só
+                combinado com filtro que já reduza o total (data, órgão, relator, número) —
+                50 itens de uma busca ampla e sem filtro pode gerar resposta grande demais
+                (achado real 11/09/2026: "dano moral" sem filtro, 50 por página, estourou
+                o limite de saída do chamador).
             base: "trf1" (padrão: TRF1 + JEF1), "tnu" (Turma Nacional de Uniformização — tipos
                 ACORDAO/DECISAOMONO/DECISAOPRES, sem filtros de painel: use nome[REL] etc. na
                 consulta; inteiro teor disponível em texto via obter_decisao_trf1) ou "colegiado"

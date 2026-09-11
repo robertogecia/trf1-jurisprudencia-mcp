@@ -1,0 +1,629 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+	
+<head>
+<meta http-equiv="Content-Type" content="text/html; UTF-8" />
+<title>Jurisprudência Unificada</title>
+<link href="css/internet.css" rel="stylesheet" type="text/css" />
+<script language="javascript" type="text/javascript" src="js/internet.js"></script>
+</head>
+
+<body>
+<noscript>Scripts do sistema</noscript>
+	<div id="formulario">
+
+		
+		<div id="conteudo">
+			<h1>Ajuda - Pesquisa jurisprudência</h1>
+			<table class="table_form" summary="Ajuda" cellpadding="3" cellspacing="5">
+				<tbody>
+					<tr>
+						<td>
+							<span>Não utilize, na expressão de busca, termos que sejam preposições, conjunções ou artigos.</span>						
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>Não utilize sinais de pontuação na expressão de busca.</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>Consulte os <a href="#_campos">Campos</a>, ou seja, parágrafos disponíveis para pesquisa.</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>Consulte a explicação sobre Pesquisas por <a href="#_data">Data</a>.</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>Consulte a explicação sobre <a href="#_operadores">Operadores</a>, para montar corretamente a expressão de busca.</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>A pesquisa não leva em conta se as letras são maiúsculas ou minúsculas, nem se estão acentuadas ou não.</span>
+						</td>
+					</tr>
+		
+				</tbody>
+			</table>
+			<br />
+			
+			<table class="table_form" summary="Parágrafos (campos)" cellpadding="3" cellspacing="5">
+				<tbody>
+					<tr>
+						<td>
+							<span>Para fazer pesquisas em parágrafos (campos específicos), deve-se utilizar as formas abaixo, onde termo[n] são termos válidos e PARAGRAFO é o nome do campo.</span>
+						</td>
+					</tr>
+					<tr class="td_center_negrito">
+						<td>
+							<span>termo1[PARAGRAFO]<br />
+							ou<br />
+							termo1.PARAGRAFO.</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>Exemplos</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>1) Para recuperar documentos em que o campo REFL apresente a Lei-8112, pesquise:</span>
+						</td>
+					</tr>
+					<tr class="td_center_negrito">
+						<td>
+							<span>Lei-8112[REFL]<br />
+							ou<br />
+							Lei-8112.REFL.</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>2) Para pesquisa, podem ser utilizados tanto o <strong>Nome Curto (ex.: REFL)</strong> como o <strong>Nome Longo (ex.: REF_LEGISLATIVA)</strong> do parágrafo.</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>3) Abaixo segue a lista dos parágrafos (campos) disponíveis para pesquisa:</span>
+						</td>
+					</tr>
+				</tbody>
+			</table>
+			<table class="table_form" summary="Lista de nomes curtos e longos" cellpadding="3" cellspacing="5">
+				<thead>
+					<tr>
+						<th width="50%" class="label">
+							<span>Nome curto</span>
+						</th>
+						<th class="label">
+							<span>Nome longo</span>
+						</th>
+					</tr>
+				</thead>
+				<tbody>
+					<tr>
+						<td>
+							<span>ID</span>
+						</td>
+						<td>
+							<span>ID_DOCUMENTO</span>
+						</td>
+					</tr>
+				
+					<tr>
+						<td>
+							<span>ORIG</span>
+						</td>
+						<td>
+							<span>ORIGEM</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>TIPO</span>
+						</td>
+						<td>
+							<span>TIPO_DOCUMENTO</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>CLAS</span>
+						</td>
+						<td>
+							<span>CLASSE</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>UF</span>
+						</td>
+						<td>
+							<span>UF</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>TRIB</span>
+						</td>
+						<td>
+							<span>TRIBUNAL</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>ORGA</span>
+						</td>
+						<td>
+							<span>ORGAO_JULGADOR</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>DTDE</span>
+						</td>
+						<td>
+							<span>DATA_DECISAO</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>DTDP</span>
+						</td>
+						<td>
+							<span>DATA_DECISAO_PESQ</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>DTPP</span>
+						</td>
+						<td>
+							<span>DATA_PUBLICACAO_PESQ</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>PROC</span>
+						</td>
+						<td>
+							<span>PROCESSO</span>
+						</td>
+					</tr>			
+					<tr>
+						<td>
+							<span>PRFO</span>
+						</td>
+						<td>
+							<span>PROCESSO_FORMATADO</span>
+						</td>
+					</tr>		
+					<tr>
+						<td>
+							<span>EMEN</span>
+						</td>
+						<td>
+							<span>EMENTA</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>DECI</span>
+						</td>
+						<td>
+							<span>DECISAO</span>
+						</td>
+					</tr>										
+					<tr>
+						<td>
+							<span>TXTO</span>
+						</td>
+						<td>
+							<span>TXT_ORIGEM</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>ITEO</span>
+						</td>
+						<td>
+							<span>INTEIRO_TEOR</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>REL</span>
+						</td>
+						<td>
+							<span>RELATOR</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>REV</span>
+						</td>
+						<td>
+							<span>REVISOR</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>RELA</span>
+						</td>
+						<td>
+							<span>RELATOR_ACORDAO</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>RELC</span>
+						</td>
+						<td>
+							<span>RELATOR_CONVOCADO</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>RESP</span>
+						</td>
+						<td>
+							<span>RELATOR_SUPLENTE</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>OBS</span>
+						</td>
+						<td>
+							<span>OBSERVACOES</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>REFL</span>
+						</td>
+						<td>
+							<span>REF_LEGISLATIVA</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>PREC</span>
+						</td>
+						<td>
+							<span>PRECEDENTES</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>SUCE</span>
+						</td>
+						<td>
+							<span>SUCESSIVOS</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>DOUT</span>
+						</td>
+						<td>
+							<span>DOUTRINA</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>INDE</span>
+						</td>
+						<td>
+							<span>INDEXACAO</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>CATA</span>
+						</td>
+						<td>
+							<span>CATALOGO</span>
+						</td>
+					</tr>
+					
+					<tr>
+						<td>
+							<span>FONT</span>
+						</td>
+						<td>
+							<span>FONTE_PUBLICACAO</span>
+						</td>
+					</tr>
+
+					<tr>
+						<td>
+							<span>OUTF</span>
+						</td>
+						<td>
+							<span>OUTRAS_FONTES</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>OURE</span>
+						</td>
+						<td>
+							<span>OUTRAS_REFERENCIAS</span>
+						</td>
+					</tr>
+				</tbody>
+			</table>
+			<h2><a name="_data">Data</a></h2>
+			<table class="table_form" summary="Data" cellpadding="3" cellspacing="5">
+				<tbody>
+					<tr>
+						<td>
+							<span>A pesquisa por uma data específica é feita utilizando-se o formato ano, mês e dia, sem separadores.</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>Exemplo:</span>
+						</td>
+					</tr>
+					<tr>
+						<td>
+							<span>Para recuperar documentos em que o campo DATA esteja preenchido com 2 de janeiro de 1995, pesquise:</span>
+						</td>
+					</tr>
+					<tr class="td_center">
+						<td>
+							<span>
+							19950102 [DTDP]  Data de Decisão<br />
+							19950102 [DTPP]  Data de Publicação
+							</span>
+						</td>
+					</tr>
+				</tbody>
+			</table>
+			<h2><a name="_operadores">Operadores</a></h2>
+			<table class="table_form" summary="Operadores" cellpadding="3" cellspacing="0">
+				<thead>
+					<tr>
+						<th class="label">
+							<span>OPERADOR</span>
+						</th>
+						<th class="label">
+							<span>DESCRIÇÃO</span>
+						</th>
+					</tr>
+				</thead>
+				<tbody>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>" "</span>
+						</td>
+						<td>
+							<p><span>As aspas permitem a pesquisa de uma expressão exatamente da forma que ela foi digitada. É utilizada para determinar uma pesquisa por sentença ou frase. Dessa forma, a sentença de pesquisa deverá ser precedida e finalizada por este operador.</span></p>
+							<p><span>Como usar: <strong>"termo1 termo2"</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>(  )</span>
+						</td>
+						<td>
+							<p><span>Os parênteses modificam a ordem hierárquica dos operadores.</span></p>
+							<p><span>Como usar: <strong>(termo1 E termo2) NAO termo3</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>E</span>
+						</td>
+						<td>
+							<p><span>O operador E permite recuperar documentos que contenham obrigatoriamente ambos os termos especificados.</span></p>
+							<p><span>Como usar: <strong>termo1 E termo2</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>OU</span>
+						</td>
+						<td>
+							<p><span>O operador OU permite recuperar documentos que contenham qualquer um dos termos especificados ou ambos. Isto é, o documento pode conter somente o primeiro termo, somente o segundo termo, ou os dois.</span></p>
+							<p><span>Como usar: <strong>termo1 OU termo2</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>NAO</span>
+						</td>
+						<td>
+							<p><span>O operador NAO permite recuperar documentos que contenham o primeiro termo, mas não contenham o segundo termo.</span></p>
+							<p><span>Como usar: <strong>termo1 NAO termo2</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>ADJ</span>
+						</td>
+						<td>
+							<p><span>O operador ADJ permite recuperar documentos nos quais os termos especificados apareçam adjacentes entre si. A ordem especificada na expressão de busca é a ordem em que os termos devem aparecer na sentença.</span></p>
+							<p><span>Como usar: <strong>termo1 ADJ[n] termo2</strong></span></p>
+							<p><span>n - indica a quantidade de termos que podem aparecer entre os dois termos especificados. Caso não especificado, assume-se que n é igual a 1. O valor máximo admitido para n é 99.</span></p>
+							<p><span>Exemplo 1: <strong>Repartição ADJ Pública</strong><br />Exemplo 2: <strong>Comissão ADJ2 Justiça</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>[  ]</span>
+						</td>
+						<td>
+							<p><span>O operador [ ] é usado para especificar em que campo o termo de pesquisa deve ocorrer.</span></p>
+							<p><span>Como usar: <strong>termo[campo]</strong></span></p>
+							<p><span>Exemplos</span></p>
+							<p><span>Para recuperar os documentos que contenham o termo APOSENTADORIA no campo INDEXAÇÃO, pesquise:</span></p>
+							<p><span><strong>aposentadoria[INDE]</strong></span></p>
+							<p><span>Para recuperar os documentos que contenham o termo APOSENTADORIA no campo INDEXAÇÃO e SILVA no campo RELATOR, pesquise:</span></p>
+							<p><span><strong>aposentadoria[INDE] E Silva[REL]</strong></span></p>
+							<p><span>Este operador pode ser aplicado a vários termos simultaneamente, utilizando-se parênteses.</span></p>
+							<p><span>Para recuperar os documentos que contenham os termos SALÁRIO e PREVIDÊNCIA, ambos no campo INDEXAÇÃO, pesquise:</span></p>
+							<p><span><strong>(salário E previdência)[INDE]</strong></span></p>
+						</td>
+					</tr>
+				
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>XOU</span>
+						</td>
+						<td>
+							<p><span>O operador XOU permite recuperar documentos que contenham OU o primeiro termo OU o segundo termo, de forma exclusiva. Isto é, NÃO são recuperados os documentos em que AMBOS os termos ocorram simultaneamente.</span></p>
+							<p><span>Como usar: <strong>termo1 XOU termo2</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>PROX</span>
+						</td>
+						<td>
+							<p><span>O operador PROX permite recuperar documentos nos quais os dois termos pesquisados apareçam na mesma sentença, em qualquer ordem.</span></p>
+							<p><span>Como usar: <strong>termo PROX[n] termo</strong></span></p>
+							<p><span>n - indica a quantidade de termos que podem aparecer entre os dois termos.</span></p>
+							<p><span>Exemplo 1: <strong>Relator PROX Comissão</strong></span><br />
+							<span>Exemplo 2: <strong>Emenda PROX3 Deputado</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>COM</span>
+						</td>
+						<td>
+							<p><span>O operador COM permite recuperar documentos em que ambos os termos apareçam na mesma sentença.</span></p>
+							<p><span>Como usar: <strong>termo1 COM termo2</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>MESMO</span>
+						</td>
+						<td>
+							<p><span>O operador MESMO permite recuperar documentos em que os termos mencionados apareçam no mesmo parágrafo ou subparágrafo.</span></p>
+							<p><span>Como usar: <strong>termo1 MESMO termo2</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>NAO ADJ</span>
+						</td>
+						<td>
+							<p><span>O operador NAO ADJ permite recuperar documentos em que o segundo termo não esteja adjacente ao primeiro termo.</span></p>
+							<p><span>Como usar: <strong>termo1 NÃO ADJ[n] termo2</strong></span></p>
+							<p><span><strong>n</strong> - indica a quantidade de termos que pode aparecer entre um termo e o outro.</span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>NAO PROX</span>
+						</td>
+						<td>
+							<p><span>O operador NAO PROX permite recuperar documentos em que o segundo termo não esteja próximo ao primeiro termo.</span></p>
+							<p><span>Como usar: <strong>termo1 NAO PROX[n] termo2</strong></span></p>
+							<p><span><strong>n</strong> - indica a quantidade de termos que podem aparecer entre os dois termos.</span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>NAO COM</span>
+						</td>
+						<td>
+							<p><span>O operador NÃO COM permite recuperar documentos que contenham o primeiro termo mas não contenham o segundo termo na mesma sentença.</span></p>
+							<p><span>Como usar: <strong>termo1 NÃO COM termo2</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>NAO MESMO</span>
+						</td>
+						<td>
+							<p><span>O operador NAO MESMO permite recuperar documentos que contenham o primeiro termo, mas não contenham o segundo no mesmo parágrafo ou subparágrafo.</span></p>
+							<p><span>Como usar: <strong>termo1 NAO MESMO termo2</strong></span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>[-]</span>
+						</td>
+						<td>
+							<p><span>O operador [-] é usado para especificar em que campo o termo de pesquisa não deve ocorrer. Ou seja, são desconsiderados os documentos que apresentam o termo no campo especificado.</span></p>
+							<p><span>Como usar: <strong>termo[-campo]</strong></span></p>
+							<p><span>Exemplo:</span></p>
+							<p><span>Para recuperar os documentos que contenham o termo PREVIDÊNCIA em algum campo, exceto no campo DOUTRINA, pesquise:</span></p>
+							<p><span><strong>Previdência[-DOUT]</strong></span></p>
+						</td>
+					</tr>
+						<tr>
+						<td class="td_top_negrito_right">
+							<span>?</span>
+						</td>
+						<td>
+							<p><span>O operador ? é usado para substituir um, e somente um, caractere qualquer em um termo pesquisado. Pode aparecer mais de uma vez na mesma expressão de busca.</span></p>
+							<p><span>Exemplos:</span></p>
+							<p><span><strong>? </strong>indica todos os termos de um caractere.</span></p>
+							<p><span><strong>MA??</strong> indica os termos que começam com MA seguidos de 2 caracteres quaisquer.</span></p>
+							<p><span><strong>A??Z</strong> indica os termos de quatro caracteres que começam com A e terminam com Z.</span></p>
+							<p><span><strong>?????</strong> indica todos os termos de cinco caracteres.</span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>$[n]</span>
+						</td>
+						<td>
+							<p><span>O operador $[n] é usado para substituir qualquer quantidade de caracteres em um termo pesquisado (n - indica a quantidade máxima de caracteres).</span></p>
+							<p><span>Exemplos:</span></p>
+							<p><span><strong>A$</strong> indica termos que começam com A.</span></p>
+							<p><span><strong>$Z</strong> indica termos que terminam com Z.</span></p>
+							<p><span><strong>A$Z</strong> indica termos que começam com A e terminam com Z.</span></p>
+							<p><span><strong>A$I$S</strong> indica termos que começam com A, terminam com S e, em alguma posição intermediária, têm um I.</span></p>
+							<p><span><strong>A$3Z</strong> indica termos de, no máximo, 5 caracteres, que começam com A e terminam com Z.</span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>{ }</span>
+						</td>
+						<td>
+							<p><span>O operador {} é usado para especificar classes e padrões. Classes e padrões representam "modelos" descritos de forma genérica, aos quais os termos devem se moldar.</span></p>
+							<p><span>Classes e padrões normalmente disponíveis</span></p>
+							<p><span><strong>{?}</strong> Todos os caracteres</span></p>
+							<p><span><strong>{A}</strong> Todos os caracteres alfabéticos</span></p>
+							<p><span><strong>{C}</strong> Consoantes</span></p>
+							<p><span><strong>{D}</strong> Dígitos</span></p>
+							<p><span><strong>{V}</strong> Vogais</span></p>
+							<p><span>Os padrões são sempre formados a partir de classes. As classes podem sempre ser usadas em combinações arbitrárias.</span></p>
+							<p><span>Por exemplo: a pesquisa <strong>{V,C,"C",C,V}</strong> procura termos que sejam compostos por uma vogal, seguida de uma consoante, seguida de "C", seguida de outra consoante, seguida de uma vogal. Neste exemplo, INCRA satisfaz a pesquisa.</span></p>
+						</td>
+					</tr>
+					<tr>
+						<td class="td_top_negrito_right">
+							<span>:</span>
+						</td>
+						<td>
+							<p><span>Os dois pontos (:) podem ser utilizados como separador para pesquisa em legislação, exceto no STJ.</span></p>
+							<p><span>Exemplo: <strong>lei:9612 COM art:1</strong></span></p>
+							<p><span>Para pesquisar no STJ utilize o operador E.</span></p>
+							<p><span>Exemplo: <strong>lei E 8112</strong></span></p>
+						</td>
+					</tr>
+					
+				</tbody>
+			</table>
+
+		</div>
+	</div>
+</body>
+</html>

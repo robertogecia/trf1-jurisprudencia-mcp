@@ -1,0 +1,9 @@
+HTTP/1.1 302 
+location: https://jurisprudencia.cjf.jus.br/trf1/index.xhtml
+content-language: en
+content-length: 0
+date: Fri, 11 Sep 2026 15:04:28 GMT
+set-cookie: 6adcc195299b516975bc215208fd1483=REDACTED_COOKIE_HASH_VALUE; path=/; HttpOnly; Secure; SameSite=None
+Set-Cookie: Cookie-CJF=REDACTED_COOKIE_CJF_VALUE; path=/; Httponly; Secure
+Strict-Transport-Security: max-age=16070400; includeSubDomains
+

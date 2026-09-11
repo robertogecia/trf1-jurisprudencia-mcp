@@ -1,0 +1,74 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<partial-response><changes><update id="j_idt16:messages"><![CDATA[<div id="j_idt16:messages" class="ui-messages ui-widget" aria-live="polite"></div>]]></update><update id="formulario:pesquisaAvancada"><![CDATA[<div id="formulario:pesquisaAvancada" class="ui-outputpanel ui-widget"><div id="formulario:j_idt25" class="ui-outputpanel ui-widget">
+
+				<h2>
+					Pesquisa por campos específicos <img alt=" " onfocus=" " title="Permite ao usuário digitar um ou mais campos específicos disponíveis, ou mesmo conjulgá-los com a pesquisa livre, restringindo o resultado da busca de acordo com o seu interesse de recuperação." onMouseOver="return escape(this.title);" src="/imagens/question.png" class="img_tooltip" />
+				</h2>
+				<table summary="Dados para pesquisa específica" cellpadding="0" cellspacing="1">
+			
+						<tr>
+							<td class="label td_right" width="177px"><label for="proc">Número</label></td>
+							<td><input id="formulario:j_idt28" name="formulario:j_idt28" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt28_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt28",{id:"formulario:j_idt28"});</script></td>
+						</tr>
+						<tr>
+							<td class="label td_right"><label for="combo_classes">Classe</label>
+							</td>
+
+							<td><input id="formulario:j_idt30" name="formulario:j_idt30" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt30_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt30",{id:"formulario:j_idt30"});</script>
+							</td>
+						</tr>
+
+						<tr>
+							<td class="label td_right"><label for="rel">Relator</label>
+							</td>
+							<td><input id="formulario:j_idt32" name="formulario:j_idt32" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt32_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt32",{id:"formulario:j_idt32"});</script></td>
+						</tr>
+						<tr>
+							<td class="label td_right"><label for="rev">Revisor</label>
+							</td>
+							<td><input id="formulario:j_idt34" name="formulario:j_idt34" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt34_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt34",{id:"formulario:j_idt34"});</script></td>
+						</tr>
+						<tr>
+							<td class="label td_right"><label for="relc">Relator
+									Convocado</label></td>
+							<td><input id="formulario:j_idt36" name="formulario:j_idt36" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt36_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt36",{id:"formulario:j_idt36"});</script></td>
+						</tr>
+						<tr>
+							<td class="label td_right"><label for="rela">Relator
+									para Acórdão</label></td>
+							<td><input id="formulario:j_idt38" name="formulario:j_idt38" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt38_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt38",{id:"formulario:j_idt38"});</script></td>
+						</tr>
+
+						<tr>
+							<td class="label td_right"><label for="combo_orgaos">Órgão
+									Julgador</label></td>
+							<td><input id="formulario:j_idt40" name="formulario:j_idt40" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt40_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt40",{id:"formulario:j_idt40"});</script>
+							</td>
+						</tr>
+						<tr>
+							<td class="label td_right"><label for="_origem">Origem</label></td>
+							<td><input id="formulario:j_idt42" name="formulario:j_idt42" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt42_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt42",{id:"formulario:j_idt42"});</script>
+							</td>
+						</tr>
+
+						<tr>
+							<td class="label td_right"><label for="emen">Ementa/Decisão</label>
+							</td>
+							<td><input id="formulario:j_idt44" name="formulario:j_idt44" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt44_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt44",{id:"formulario:j_idt44"});</script></td>
+						</tr>
+
+						<tr>
+							<td class="label td_right"><label for="refl">Referência
+									legislativa</label></td>
+							<td><input id="formulario:j_idt46" name="formulario:j_idt46" type="text" class="ui-inputfield ui-inputtext ui-widget ui-state-default ui-corner-all txt_gd" /><script id="formulario:j_idt46_s" type="text/javascript">PrimeFaces.cw("InputText","widget_formulario_j_idt46",{id:"formulario:j_idt46"});</script></td>
+						</tr>
+
+						<tr>
+							<td class="label td_right"><label>Data (dd/mm/aaaa)</label></td>
+							<td><span id="formulario:j_idt48" class="ui-calendar"><input id="formulario:j_idt48_input" name="formulario:j_idt48_input" type="text" class="ui-inputfield ui-widget ui-state-default ui-corner-all" /></span><script id="formulario:j_idt48_s" type="text/javascript">PrimeFaces.cw("Calendar","widget_formulario_j_idt48",{id:"formulario:j_idt48",popup:true,locale:"pt_BR",dateFormat:"dd\/mm\/yy"});</script>
+								<label> a </label><span id="formulario:j_idt50" class="ui-calendar"><input id="formulario:j_idt50_input" name="formulario:j_idt50_input" type="text" class="ui-inputfield ui-widget ui-state-default ui-corner-all" /></span><script id="formulario:j_idt50_s" type="text/javascript">PrimeFaces.cw("Calendar","widget_formulario_j_idt50",{id:"formulario:j_idt50",popup:true,locale:"pt_BR",dateFormat:"dd\/mm\/yy"});</script> 
+									<label for="combo_tipo_data"> Tipo:
+							</label><div id="formulario:combo_tipo_data" class="ui-selectonemenu ui-widget ui-state-default ui-corner-all" role="combobox" aria-haspopup="true" aria-expanded="false"><div class="ui-helper-hidden-accessible"><input id="formulario:combo_tipo_data_focus" name="formulario:combo_tipo_data_focus" type="text" autocomplete="off" aria-expanded="false" /></div><div class="ui-helper-hidden-accessible"><select id="formulario:combo_tipo_data_input" name="formulario:combo_tipo_data_input" tabindex="-1" aria-hidden="true"><option value="DTDP">Julgamento</option><option value="DTPP">Publicação</option></select></div><label id="formulario:combo_tipo_data_label" class="ui-selectonemenu-label ui-inputfield ui-corner-all">&nbsp;</label><div class="ui-selectonemenu-trigger ui-state-default ui-corner-right"><span class="ui-icon ui-icon-triangle-1-s ui-c"></span></div><div id="formulario:combo_tipo_data_panel" class="ui-selectonemenu-panel ui-widget ui-widget-content ui-corner-all ui-helper-hidden ui-shadow ui-input-overlay"><div class="ui-selectonemenu-items-wrapper" style="max-height:200px"><ul id="formulario:combo_tipo_data_items" class="ui-selectonemenu-items ui-selectonemenu-list ui-widget-content ui-widget ui-corner-all ui-helper-reset" role="listbox"><li class="ui-selectonemenu-item ui-selectonemenu-list-item ui-corner-all" data-label="Julgamento" tabindex="-1" role="option">Julgamento</li><li class="ui-selectonemenu-item ui-selectonemenu-list-item ui-corner-all" data-label="Publicação" tabindex="-1" role="option">Publicação</li></ul></div></div></div><script id="formulario:combo_tipo_data_s" type="text/javascript">PrimeFaces.cw("SelectOneMenu","widget_formulario_combo_tipo_data",{id:"formulario:combo_tipo_data"});</script></td>
+						</tr>
+				
+				</table></div></div>]]></update><update id="j_id1:javax.faces.ViewState:0"><![CDATA[-2568262019688462581:-5951574221483686648]]></update></changes></partial-response>

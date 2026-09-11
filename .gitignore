@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.disjuntor_estado_trf1.json
+.disjuntor_estado_trf1.json.lock
+*.tmp
+.DS_Store
+cookies.txt
+body_01_trf1.html

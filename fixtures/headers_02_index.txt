@@ -1,0 +1,8 @@
+HTTP/1.1 200 
+set-cookie: JSESSIONID=REDACTED_JSESSIONID; Path=/; Secure; HttpOnly
+content-type: text/html;charset=UTF-8
+transfer-encoding: chunked
+date: Fri, 11 Sep 2026 15:04:39 GMT
+Strict-Transport-Security: max-age=16070400; includeSubDomains
+Vary: Accept-Encoding
+

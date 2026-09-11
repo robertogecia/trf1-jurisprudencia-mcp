@@ -1,0 +1,8 @@
+HTTP/1.1 200 
+cache-control: no-cache
+content-type: text/xml;charset=UTF-8
+transfer-encoding: chunked
+date: Fri, 11 Sep 2026 15:07:15 GMT
+Strict-Transport-Security: max-age=16070400; includeSubDomains
+Vary: Accept-Encoding
+

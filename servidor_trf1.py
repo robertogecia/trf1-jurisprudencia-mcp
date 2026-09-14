@@ -570,6 +570,27 @@ def _citacao(d: dict) -> str:
     return "(" + ", ".join(partes) + ")"
 
 
+def _link_documento_especifico(d: dict) -> str:
+    """Link do inteiro teor só quando é ESPECÍFICO deste documento — nunca o link
+    genérico de busca do PJe (mesmo href em todo resultado PJe, não aponta pro
+    julgado certo). arquivo.trf1.jus.br (p1=CNJ) e o eproc da TNU (id_jurisprudencia)
+    são por documento; "pje" é o único tipo genérico conhecido."""
+    link = d.get("link_inteiro_teor") or ""
+    return link if link and d.get("link_tipo") not in ("", "pje") else ""
+
+
+def _citacao_com_link(d: dict) -> str:
+    """Citação pronta para peça, com a REFERÊNCIA INTEIRA (parênteses incluídos)
+    em hiperlink markdown para onde o inteiro teor foi encontrado — mesma
+    convenção da skill peticao-rg desde 14/09/2026 ("a referência inteira entre
+    parênteses vira link clicável"), aplicada aqui na origem, com o link que a
+    própria busca já encontrou. Nunca fabrica link: sem link específico deste
+    documento (arquivo.trf1/eproc da TNU), devolve a citação em texto plano."""
+    texto = _citacao(d)
+    link = _link_documento_especifico(d)
+    return f"[{texto}]({link})" if link else texto
+
+
 def _nota_inteiro_teor(d: dict) -> str:
     if d.get("link_tipo") == "tnu":
         return (f"Inteiro teor: disponível em texto — obter_decisao_trf1(numero, base=\"tnu\") traz o "
@@ -658,7 +679,7 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
         if d.get("fonte_publicacao"):
             meta_l.append(f"Fonte: {d['fonte_publicacao']}")
         linhas.append("  " + " · ".join(meta_l))
-        linhas.append(f"  Citação: {_citacao(d)}")
+        linhas.append(f"  Citação: {_citacao_com_link(d)}")
         em = d.get("ementa") or ""
         if len(em) > TRECHO_EMENTA:
             houve_corte = True
@@ -719,7 +740,7 @@ def _format_decisao(docs: list[dict], numero: str, total: int) -> str:
     orcamento_por_doc = max(8_000, ORCAMENTO_DECISAO // max(1, len(docs)))
     for d in docs:
         linhas.append(f"\n### {d.get('tipo') or 'Documento'} · id {d['id']} · julgado em {d.get('data_julgamento') or '?'}")
-        linhas.append(f"Citação: {_citacao(d)}")
+        linhas.append(f"Citação: {_citacao_com_link(d)}")
         campos = d.get("campos") or {}
         extras = {k: v for k, v in campos.items() if k not in ("Ementa", "Decisão", "Inteiro teor", "Número", "Fonte da publicação")}
         linhas.append("  " + " · ".join(f"{k}: {v}" for k, v in extras.items()))
@@ -1597,8 +1618,11 @@ try:
             classe, número, ID DO DOCUMENTO (chave única daquela decisão — sob o mesmo número
             convivem acórdão, embargos e decisão monocrática), relator (e convocado / para acórdão),
             órgão, datas, citação pronta para peça no padrão "(TRF-1 - AC: nº, Relator: …, Data de
-            Julgamento: …, TURMA, Data de Publicação: …)", ementa (trecho de 800 caracteres — ementa
-            numerada aplica a tese nos últimos itens), dispositivo (trecho) e a nota de inteiro teor.
+            Julgamento: …, TURMA, Data de Publicação: …)" — com a referência INTEIRA em hiperlink
+            markdown para o inteiro teor quando o portal deu um link específico deste documento
+            (arquivo.trf1/eproc da TNU; nunca o link genérico do PJe), ementa (trecho de 800
+            caracteres — ementa numerada aplica a tese nos últimos itens), dispositivo (trecho) e a
+            nota de inteiro teor.
             Avisa "mesmo número, N documentos" e resultados opostos no mesmo julgamento. Com 3+
             resultados, resume offline quantos julgamentos declaram cada resultado. Antes de citar,
             use obter_decisao_trf1 para a ementa e o dispositivo integrais.
@@ -1789,6 +1813,8 @@ if __name__ == "__main__":
         ct = _citacao(docs_tnu[0])
         assert ct.startswith("(TNU - ") and "Origem:" not in ct and "TURMA NACIONAL DE UNIFORMIZAÇÃO" in ct, ct
         assert "disponível em texto" in _nota_inteiro_teor(docs_tnu[0])
+        assert docs_tnu[0]["link_tipo"] == "tnu"
+        assert _citacao_com_link(docs_tnu[0]) == f"[{ct}]({docs_tnu[0]['link_inteiro_teor']})"
         sb = _format_busca(docs_tnu[:3], 725, {"consulta_montada": "x", "tipos": ["ACORDAO"], "fontes": [], "pagina": 1, "por_pagina": 30, "base": "tnu", "tipo_acordao": ["RELEVANTE"]})
         assert "CJF/TNU" in sb and "precedentes: Precedentes Relevantes" in sb and "fonte:" not in sb, sb[:300]
         xml_col = _ler("09_colegiado_busca.xml")
@@ -1796,6 +1822,9 @@ if __name__ == "__main__":
         assert len(docs_col) == 15 and docs_col[0]["data_julgamento"] == "" and docs_col[0]["data_publicacao"]
         assert len(docs_col[0]["inteiro_teor_embutido"]) > 5000 and "RELATOR" in docs_col[0]["inteiro_teor_embutido"]
         assert _citacao(docs_col[0]).startswith("(CJF - ") and "Origem:" not in _citacao(docs_col[0])
+        # colegiado sem link (embutido só como texto): citação sem hiperlink
+        assert not docs_col[0]["link_inteiro_teor"]
+        assert _citacao_com_link(docs_col[0]) == _citacao(docs_col[0])
         it_txt = _texto_documento(open(os.path.join(fx, "12_tnu_inteiro_teor.html"), encoding="iso-8859-1").read())
         assert 10_000 < len(it_txt) < 20_000 and "RELATOR" in it_txt and "Votante" in it_txt, len(it_txt)
         assert "<" not in it_txt[:5000]
@@ -1853,6 +1882,15 @@ if __name__ == "__main__":
         assert any(d["link_tipo"] == "pje" for d in docs)
         cit = _citacao(d0)
         assert cit.startswith("(TRF-1 - ACP: 0001369-17.2017.4.01.3606, Relator: JUIZ FEDERAL CHARLES RENAUD"), cit
+        # hiperlink na referência inteira SÓ quando o link é específico do documento
+        # (arquivo.trf1/eproc da TNU); nunca no genérico do PJe (achado 14/09/2026)
+        assert d0["link_tipo"] == "arquivo"
+        cl = _citacao_com_link(d0)
+        assert cl == f"[{cit}]({d0['link_inteiro_teor']})", cl
+        d_pje = next(x for x in docs if x["link_tipo"] == "pje")
+        assert _citacao_com_link(d_pje) == _citacao(d_pje), "link genérico do PJe não deve virar hiperlink"
+        assert _link_documento_especifico(dict(d0, link_tipo="", link_inteiro_teor="")) == ""
+        assert _link_documento_especifico(dict(d0, link_tipo="outro", link_inteiro_teor="https://x")) == "https://x"
         assert "Data de Julgamento: 14/08/2026, QUINTA TURMA, Data de Publicação: 14/08/2026)" in cit, cit
         # dispositivo → resultado
         assert _resultado_de(d0["decisao"]) == {"DESPROVIDO"}, _resultado_de(d0["decisao"])
@@ -1863,7 +1901,7 @@ if __name__ == "__main__":
         assert r["total_julgamentos"] == 30 and sum(r["contagem"].values()) + r["sem_resultado"] == 30, r
         saida = _format_busca(docs, 25943, {"consulta_montada": "dano moral", "tipos": ["ACORDAO"], "fontes": ["TRF1"], "pagina": 1, "por_pagina": 30})
         assert "**25943 documento(s)**" in saida and "Id. do documento: 1174043" in saida
-        assert "Citação: (TRF-1 - ACP:" in saida and "Próxima página: pagina=2" in saida
+        assert "Citação: [(TRF-1 - ACP:" in saida and "Próxima página: pagina=2" in saida
         assert "Resumo desta página" in saida and "abrir NO NAVEGADOR" in saida
         assert "Ementas cortadas" in saida
         # paginação: update de tabelaDocumentos, índices 30-59

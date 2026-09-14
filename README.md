@@ -26,9 +26,14 @@ Nas bases `tnu`/`colegiado` não há painel avançado: filtro vai na sintaxe de 
 
 Cada resultado traz: tipo, classe, número, **id do documento** (chave única — sob o mesmo número
 convivem várias decisões), relator (+ convocado / para acórdão), órgão, datas, fonte, citação no
-padrão `(TRF-1 - AC: nº, Relator: …, Data de Julgamento: …, TURMA, Data de Publicação: …)`,
-ementa (trecho de 800 chars na busca; integral em `obter_decisao_trf1`), dispositivo, e a nota
-de inteiro teor.
+padrão `(TRF-1 - AC: nº, Relator: …, Data de Julgamento: …, TURMA, Data de Publicação: …)` —
+com a **referência inteira em hiperlink** para o inteiro teor quando o portal deu um link
+específico deste documento (`arquivo.trf1.jus.br`, eproc da TNU), nunca no link genérico do
+PJe (mesmo href em todo resultado PJe — hiperlinkar ali apontaria pro lugar errado). Mesma
+convenção que a skill `peticao-rg` já aplica para o TJRO desde 14/09/2026 ("a referência
+inteira entre parênteses vira link clicável"), só que aqui na origem, com o link que a
+própria busca encontrou — ementa (trecho de 800 chars na busca; integral em
+`obter_decisao_trf1`), dispositivo, e a nota de inteiro teor.
 
 ## Limite estrutural — dito sem rodeio
 

@@ -8,3 +8,5 @@ __pycache__/
 cookies.txt
 body_01_trf1.html
 fixtures/_contador.txt
+references/arquitetura-tjro.md
+servidor_trf1.py.bak-*

@@ -1,0 +1,4 @@
+# mcp<2 de propósito: a série 2.x renomeou FastMCP e o registro das ferramentas falha em silêncio.
+mcp[cli]>=1.4.0,<2
+httpx>=0.27
+truststore>=0.9

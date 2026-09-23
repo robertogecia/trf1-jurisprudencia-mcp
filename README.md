@@ -12,8 +12,13 @@ Não é produto oficial do TRF1, do CJF nem da TNU. Toda saída é rascunho: que
 
 ## Instalar
 
-> **Nunca usou o Terminal? Comece pelo [guia de instalação passo a passo](INSTALAR.md)** — explica onde clicar, o
-> que colar e o que cada coisa faz. O resumo abaixo é para quem já tem familiaridade com linha de comando.
+> **Usa o Claude Desktop e nunca usou o Terminal? Use o instalador de um clique:**
+> **[⬇️ trf1-jurisprudencia-mcpb](https://github.com/robertogecia/trf1-jurisprudencia-mcpb)** — baixe o
+> arquivo `.mcpb`, dê dois cliques, arraste para o Claude Desktop. Zero linha de comando. É um porte em
+> Node.js deste mesmo servidor (paridade testada); este repositório continua a fonte de verdade do
+> comportamento. Se preferir o caminho por Terminal mesmo assim, o **[guia passo a passo](INSTALAR.md)**
+> explica onde clicar, o que colar e o que cada coisa faz. O resumo abaixo é para quem já tem
+> familiaridade com linha de comando.
 
 ```bash
 git clone https://github.com/robertogecia/trf1-jurisprudencia-mcp.git trf1-jurisprudencia && cd trf1-jurisprudencia

@@ -1,5 +1,12 @@
 # Histórico
 
+- **(23/09/2026)** — instalador de um clique: **[trf1-jurisprudencia-mcpb](https://github.com/robertogecia/trf1-jurisprudencia-mcpb)**,
+  porte em Node.js empacotado como extensão `.mcpb` para o Claude Desktop (baixar, dois cliques, arrastar —
+  sem Terminal), no molde do `tjro-jurisprudencia-mcp` e do `tcero-jurisprudencia-mcpb`. Fonte de verdade
+  continua este repositório: mudança de comportamento entra aqui primeiro, com selftest e red team; o porte
+  Node é testado por paridade (28 casos, os mesmos fixtures) e teste ao vivo contra o portal antes de publicar.
+  README deste repositório aponta para o instalador logo no topo da seção "Instalar".
+
 - **v1.1.0 (22/09/2026)** — porte das melhorias dos servidores irmãos (TJRO v1.7.x e TJSE v0.8.x), a partir das 8
   determinações de `references/correcoes-determinadas-2026-09-22.md` (comparação linha a linha com o servidor do
   TJSE, feita por agente Opus):

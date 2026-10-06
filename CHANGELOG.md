@@ -1,5 +1,7 @@
 # Histórico
 
+- **v1.2.1 (06/10/2026)** — correção: o Python não tinha "sem razão" como operador de NEGAÇÃO e a extensão tinha (a regra entrou nos outros
+  servidores antes do porte do TRF1, e o Python copiou o bloco antigo). Agora os dois avisam; caso novo no selftest e no teste do Node.
 - **v1.2.0 (06/10/2026)** — regras de atribuição do TJRO v1.13/1.15 (aspas, alegação, negação) e o alerta OBITER DICTUM?.
   `verificar_citacao_trf1` passa a usar o mesmo bloco que o STJ, o TRT14 e o TJSE (`atribuicao13.js` no pacote Node é cópia
   byte a byte): ENTRE ASPAS por pareamento das aspas no documento inteiro (curvas e retas numa pilha só, reta orientada pelo

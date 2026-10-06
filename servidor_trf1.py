@@ -49,7 +49,7 @@ import unicodedata
 import urllib.parse
 from typing import Any
 
-VERSAO = "1.2.0"
+VERSAO = "1.2.1"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -780,7 +780,7 @@ def _alegacao_da_parte(tn: str, ini0: int, fim: int | None = None, bruto: str | 
 
 # NEGAÇÃO: operador de negação/rejeição a até 80 caracteres, sem quebra de oração até o trecho, alcançando ao menos 3 palavras
 # dele. Adjetivo solto ("inexistente", "indevido") e "NÃO CONHECIDO." de ementa não contam.
-_RE_NEG_OPERADOR = re.compile(r"(?<![a-z0-9])(?:nao|jamais|nunca|nem|descabe|descabid[oa]s?|incabive(?:l|is)|afasta-se|afasto|afastad[oa]s?|rejeita-se|rejeito|rejeitad[oa]s?|nego|negou|negar|nega-se|negam|improcede|julg(?:ou|o|ar|aram|ada|ado|ados|adas)\s+improcedentes?|inexist(?:e|em|ir|iu|indo)|carece|carecem|impossibilidade de)(?![a-z0-9])", _A)
+_RE_NEG_OPERADOR = re.compile(r"(?<![a-z0-9])(?:nao|jamais|nunca|nem|descabe|descabid[oa]s?|incabive(?:l|is)|afasta-se|afasto|afastad[oa]s?|rejeita-se|rejeito|rejeitad[oa]s?|nego|negou|negar|nega-se|negam|improcede|julg(?:ou|o|ar|aram|ada|ado|ados|adas)\s+improcedentes?|inexist(?:e|em|ir|iu|indo)|carece|carecem|impossibilidade de|sem razao|sem razoes)(?![a-z0-9])", _A)
 # "não havendo dúvida de que X" / "não há dúvida de que X" afirmam X (achado no STJ, 05/10/2026)
 _RE_NEG_FALSA = re.compile(r"\s*(?:obstante|so\b|apenas|somente|se\s+confunde|(?:havendo|ha|houve|resta|restam|restando|pairam?)\s+(?:qualquer\s+|mais\s+)?duvidas?)", _A)
 _RE_QUEBRA_ORACAO = re.compile(r"[.;:]|,\s*(?:mas|e|ou|que|o que|de forma|de modo|sendo|alem|conforme|porque|pois|porquanto|embora|ainda|razao pela|motivo pelo|[a-z]+ndo)(?![a-z0-9])|\smas\s", _A)
@@ -2961,6 +2961,9 @@ if __name__ == "__main__":
                                  "conforme a doutrina, \"o prazo decadencial é de dez anos para revisão de benefício\"."},
                                 "o prazo decadencial é de dez anos", tribunal="TNU")
         assert r_t["valido"] and any(a.startswith("ENTRE ASPAS") for a in r_t["alertas"]), r_t
+        # v1.2.1: "sem razão" nega (Python e Node em acordo; na 1.2.0 só o Node tinha)
+        _sr = conferir("VOTO Sem razão o apelante ao dizer que o benefício é devido desde o requerimento administrativo.", "o benefício é devido desde o requerimento")
+        assert any(a.startswith("NEGAÇÃO") for a in _sr["alertas"]), _sr
         # 4. ENTRE ASPAS também na ementa (Súmula 111 do STJ transcrita não é palavra do TRF1)
         r_e = _verificar_trecho({"ementa": 'HONORÁRIOS. Incide a Súmula 111 do STJ, segundo a qual "os honorários advocatícios, nas '
                                  'ações previdenciárias, não incidem sobre as prestações vencidas após a sentença". Apelação provida.'},

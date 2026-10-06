@@ -1,5 +1,16 @@
 # Histórico
 
+- **v1.2.0 (06/10/2026)** — regras de atribuição do TJRO v1.13/1.15 (aspas, alegação, negação) e o alerta OBITER DICTUM?.
+  `verificar_citacao_trf1` passa a usar o mesmo bloco que o STJ, o TRT14 e o TJSE (`atribuicao13.js` no pacote Node é cópia
+  byte a byte): ENTRE ASPAS por pareamento das aspas no documento inteiro (curvas e retas numa pilha só, reta orientada pelo
+  vizinho, « »; tese fixada pelo próprio colegiado continua sem alerta), ALEGAÇÃO DA PARTE por verbo de relato com a parte
+  como sujeito na FRASE do trecho, NEGAÇÃO por alcance (operador sem quebra de oração até o trecho, 3+ palavras dele; "não
+  havendo dúvida" não nega; "sem razão" nega) e OBITER DICTUM? (marca contrafactual na mesma frase: "ainda que assim não
+  fosse", "a título de argumentação"; só no inteiro teor, nunca em frase já entre aspas). Números cegos vêm do TJRO (aspas
+  100%/70%, negação 68%, alegação 71-90%, obiter 86%), do STJ, do TRT14 e do TJSE; no TRF1 não há gabarito próprio — na base
+  `trf1` (ementa e dispositivo, sem voto) só aspas e negação atuam; na TNU, tudo. Aspas simples retas (') deixam de contar
+  como aspas (apóstrofo de "d'água"); as fixtures do selftest usavam-nas e passaram a aspas duplas. Python v1.2.0 e Node
+  v1.2.0 (28 testes).
 - **(23/09/2026)** — instalador de um clique: **[trf1-jurisprudencia-mcpb](https://github.com/robertogecia/trf1-jurisprudencia-mcpb)**,
   porte em Node.js empacotado como extensão `.mcpb` para o Claude Desktop (baixar, dois cliques, arrastar —
   sem Terminal), no molde do `tjro-jurisprudencia-mcp` e do `tcero-jurisprudencia-mcpb`. Fonte de verdade

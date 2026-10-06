@@ -40,14 +40,16 @@ import hashlib
 import html as _html
 import json
 import os
+import platform
 import re
 import sys
 import threading
 import time
 import unicodedata
+import urllib.parse
 from typing import Any
 
-VERSAO = "1.1.0"
+VERSAO = "1.2.0"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -666,6 +668,259 @@ def _bruto(corpo: str, tn: str, pos_norm: int) -> int:
     return chute
 
 
+
+# ======================================================================================================================
+# Porte das regras do TJRO v1.13/1.15 (06/10/2026), via bloco já portado ao TRT14 e ao TJSE: ENTRE ASPAS por pareamento
+# (reta orientada, mesma pilha das curvas, « »; tese própria entre aspas continua sem alerta), NEGAÇÃO por alcance,
+# ALEGAÇÃO DA PARTE por frase, OBITER DICTUM? por marca contrafactual na mesma frase. Tudo sobre _norm1(bruto), 1:1.
+_A = re.ASCII
+_NORM1_CACHE: dict[str, str] = {}
+_JS_WS = frozenset("\t\n\v\f\r \u00a0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff") | frozenset(chr(c) for c in range(0x2000, 0x200B))
+_ASPAS_NORM1 = frozenset("\u201c\u201d\u2018\u2019\"`\u00b4\u00ab\u00bb")
+def _norm1(s: str) -> str:
+    """minúsculas, sem acento, espaços e aspas unificados — 1 caractere → 1 caractere."""
+    out = []
+    for c in s or "":
+        d = _NORM1_CACHE.get(c)
+        if d is None:
+            if c in _JS_WS:
+                d = " "
+            elif c in _ASPAS_NORM1:
+                d = "'"
+            elif c in "–—":
+                d = "-"
+            else:
+                x = "".join(ch for ch in unicodedata.normalize("NFKD", c) if unicodedata.category(ch) != "Mn").lower()
+                d = x if len(x) == 1 else (x[0] if x else " ")
+            _NORM1_CACHE[c] = d
+        out.append(d)
+    return "".join(out)
+
+
+_RE_VERBO_RELATO = re.compile(
+    r"(?<![a-z0-9])(?:sustent(?:a|am|ou|aram|ando)|alega(?:m|ram|ndo)?|alegou|aduz(?:em|iu|indo)?|defende(?:m|u|ram|ndo)?|afirma(?:m|ram|ndo)?|afirmou"
+    r"|argument(?:a|am|ou|ando)|requer(?:em|eu|eram|endo)?|pleite(?:ia|iam|ou|aram|ando)|pugn(?:a|am|ou|ando)|invoc(?:a|am|ou|ando)"
+    r"|insist(?:e|em|iu|indo)|impugn(?:a|am|ou|ando)|assever(?:a|am|ou|ando)|ressalt(?:a|am|ou)|enfatiz(?:a|am|ou)|reiter(?:a|am|ou)"
+    r"|postul(?:a|am|ou)|narr(?:a|am|ou)|inform(?:a|am|ou)|disse|suscit(?:a|am|ou)|apont(?:a|am|ou)"
+    r"|alegue|alegu?em|sustente|sustentem|defenda|defendam|afirme|argumente|pretend(?:a|e|em|eu)|pretendam|ped(?:e|em|iu|iram|indo)|propugn(?:a|am|ou|ando)|acrescent(?:a|am|ou|ando)|destac(?:a|am|ou|ando)|pondera(?:m|ram|ndo)?|ponderou|anota(?:m|ram|ndo)?|anotou|diz)(?![a-z0-9])", _A)
+# lista do TJRO + as partes da Justiça do Trabalho e do STJ
+_RE_PARTE_NO_TEXTO_P = re.compile(
+    r"(?<![a-z0-9])(?:apelantes?|apelad[oa]s?|agravantes?|agravad[oa]s?|recorrentes?|recorrid[oa]s?|embargantes?|embargad[oa]s?|autor(?:a|es|as)?|reus?|re|requerentes?|requerid[oa]s?|impetrantes?|impetrad[oa]s?|exequentes?|executad[oa]s?|partes?|banco|instituicao financeira|estado|municipio|uniao|ministerio publico|parquet|defensoria|procuradoria|arguentes?|arguid[oa]s?|reclamantes?|reclamad[oa]s?|seguradora|fundo|cessionari[oa]|devedor[a]?|credor[a]?|locatari[oa]|locador[a]?|consumidor[a]?"
+    r"|obreir[oa]s?|empregador(?:a|es|as)?|trabalhador(?:a|es|as)?|sindicato|litisconsortes?|demandad[oa]s?|demandantes?|ente publico|suscitantes?|suscitad[oa]s?|paciente|defesa|fazenda)(?![a-z0-9])", _A)
+_RE_SUJEITO_EM_RAZOES = re.compile(r"(?<![a-z0-9])(?:(?:em|nas|suas) (?:suas )?razoes|contrarrazoes)(?![a-z0-9])", _A)
+_RE_VOZ_PROPRIA_P = re.compile(r"\b(?:nesse sentido|neste sentido|com efeito|no caso dos autos|no caso em tela|no caso concreto|in casu|na hipotese dos autos|na especie|entendo|ante o exposto|diante do exposto|pelo exposto|isso posto|e como voto|e o voto|voto por|voto pelo|passo a|compulsando|assim sendo|dessa forma|desta forma|rejeito|nao vejo|submeto aos pares|como se sabe|como foi narrado|nesse contexto)\b|\b[ivx]{1,4}\s*[-.)]\s*d[aeo]s?\s+(?:merito|preliminar|recurso|apelacao|dano|pedido)", _A)
+_RE_VOZ_DO_TRIBUNAL_P = re.compile(
+    r"(?<![a-z0-9])(?:contudo|todavia|entretanto|no entanto|ocorre que|porem|de fato|com efeito|sem razao|nao assiste|nao merece|nao prospera|improcede|conheco|constato|constatei|verifico|verifiquei|observo|observei|analisei|tenho que|consigno|cumpre|importante destacar|e importante|e certo|e sabido|como e sabido|ora,|logo,|assim,|portanto|dessa forma|neste caso|nesse caso|nesse cenario|nessa hipotese|no caso|a meu ver|na verdade|diante disso|nessa linha|revela|homologo|condeno|julgo|determino|arbitro|fixo|defiro|indefiro|nego|dou provimento|acolho|rejeito|declaro|reconheco|entendo|concluo|decido|passo a"
+    r"|tem-se|tem se|infere-se|conclui-se|depreende-se|extrai-se|verifica- ?se|constata- ?se|nota-se|observa- ?se|percebe-se|denota-se|ve-se|evidencia-se|trata-se"
+    r"|nao ha duvidas?|nao resta duvida|nao restam duvidas|compete ao|compete a|cabe ao|cabia ao|incumbe|incumbia|com razao|razao assiste|assiste razao)(?![a-z0-9])", _A)
+_ALEGACAO_DIST_MAX, _ALEGACAO_SUJEITO_JANELA, _ALEGACAO_CABECA = 600, 200, 0.4
+_RE_ABREV = re.compile(r"(?:^|[^a-z0-9])(?:art|arts|n|no|nos|fl|fls|id|ids|des|desa|dr|dra|sr|sra|min|rel|inc|p|pp|pag|proc|cf|num|ex|exmo|exma|res|sum|ed|v|vol|cap|al|rr|c/c|ss)$", _A)
+_RE_ADVERSATIVA = re.compile(r"(?<![a-z0-9])(?:contudo|todavia|entretanto|no entanto|porem|mas(?! tambem))(?![a-z0-9])", _A)
+_RE_CONCESSIVA = re.compile(r"(?<![a-z0-9])(?:embora|conquanto|ainda que|apesar de|em que pese|nao obstante|a despeito de|malgrado|se bem que)(?![a-z0-9])[^,.;]{0,90}$", _A)
+_RE_ATRIB_EXPLICITA = re.compile(r"(?<![a-z0-9])(?:segundo|conforme|de acordo com|na visao d[eoa]|para)\s+(?:[oa]s?\s+)?(?:parte\s+)?(?:apelantes?|apelad[oa]s?|agravantes?|agravad[oa]s?|recorrentes?|recorrid[oa]s?|embargantes?|embargad[oa]s?|autor(?:a|es|as)?|reus?|requerentes?|requerid[oa]s?|reclamantes?|reclamad[oa]s?|banco|inicial|contestacao)(?![a-z0-9])", _A)
+_RE_QUEBRA_FRASE = re.compile(r"[.;!?][\"”’»)\]]?\s+(?=[\"“‘«(\[]?[A-ZÀ-Ý0-9])", _A)
+_RE_VERBO_NEGADO = re.compile(r"(?:^|[^a-z0-9])(?:nao|nem|jamais|nunca)\s+(?:se\s+)?$", _A)
+_RE_VERBO_NO_INICIO = re.compile(r"\s*(?:[a-z]+(?: [a-z]+){0,4},\s+){0,2}(?:[a-z]+\s+){0,2}", _A)
+_RE_NAO_ANTES = re.compile(r"(?<![a-z0-9])nao(?![a-z0-9])[^.;]{0,70}$", _A)
+_RE_CORTE_SUJEITO = re.compile(r"[,.;]| que ", _A)
+_RE_AO_CONTRARIO = re.compile(r"(?:ao contrario|diferentemente|diversamente|contrariamente)\s+(?:do|ao)\s+que\s+(?:[a-z]+\s+){0,2}$", _A)
+
+
+def _inicio_da_frase(bruto: str, tn: str, piso: int, p: int) -> int:
+    ini = piso
+    for m in _RE_QUEBRA_FRASE.finditer(bruto[piso:p]):
+        if m.group(0)[0] == "." and _RE_ABREV.search(tn[max(piso, piso + m.start() - 8):piso + m.start()]):
+            continue
+        ini = piso + m.end()
+    return ini
+
+
+def _alegacao_da_parte(tn: str, ini0: int, fim: int | None = None, bruto: str | None = None) -> bool:
+    """O verbo de relato (sustenta, alega, requer…) com a parte como sujeito está na MESMA FRASE do grosso do trecho, sem voz do
+    tribunal, adversativa ou concessiva entre eles; verbo negado e "-se" impessoal não contam."""
+    if fim is None:
+        fim = ini0 + 80
+    cabeca = ini0 + int((fim - ini0) * _ALEGACAO_CABECA)
+    piso = max(0, ini0 - _ALEGACAO_DIST_MAX)
+    frase0 = _inicio_da_frase(bruto or tn, tn, piso, cabeca)
+    ate = fim if frase0 > ini0 else cabeca
+    frase = tn[frase0:ate]
+    if _RE_ATRIB_EXPLICITA.search(tn[ini0:fim]):
+        return False
+    fim_verbo, explicito_no_trecho = -1, False
+    for m in _RE_VERBO_RELATO.finditer(frase):
+        pos = frase0 + m.start()
+        depois = tn[pos + len(m.group(0)):pos + len(m.group(0)) + 45]
+        if depois.startswith("-se"):
+            continue
+        if _RE_VERBO_NEGADO.search(tn[max(frase0, pos - 12):pos]):
+            continue
+        if _RE_AO_CONTRARIO.search(tn[max(frase0, pos - 30):pos]):
+            continue  # "ao contrário do que sustenta o recorrente, …": é o tribunal refutando (achado no STJ, 05/10/2026)
+        antes = tn[max(frase0, pos - _ALEGACAO_SUJEITO_JANELA):pos]
+        no_inicio = bool(_RE_VERBO_NO_INICIO.fullmatch(tn[frase0:pos]))
+        sujeito = bool(_RE_PARTE_NO_TEXTO_P.search(antes) or _RE_SUJEITO_EM_RAZOES.search(antes)
+                       or _RE_PARTE_NO_TEXTO_P.search(_RE_CORTE_SUJEITO.split(depois[:40])[0]))
+        if (not no_inicio) if m.group(0) == "diz" else (not sujeito and not no_inicio):
+            continue
+        fim_verbo = pos + len(m.group(0))
+        explicito_no_trecho = pos >= ini0 and bool(_RE_PARTE_NO_TEXTO_P.search(tn[ini0:pos]))
+    if fim_verbo < 0 or explicito_no_trecho:
+        return False
+    entre = tn[fim_verbo:max(fim_verbo, cabeca)]
+    if _RE_VOZ_PROPRIA_P.search(entre) or _RE_VOZ_DO_TRIBUNAL_P.search(entre):
+        return False
+    adv = _RE_ADVERSATIVA.search(entre)
+    if adv and not (adv.group(0) == "mas" and _RE_NAO_ANTES.search(entre[:adv.start()])):
+        return False
+    if _RE_CONCESSIVA.search(tn[frase0:fim_verbo]) and "," in tn[fim_verbo:ini0]:
+        return False
+    return True
+
+
+# NEGAÇÃO: operador de negação/rejeição a até 80 caracteres, sem quebra de oração até o trecho, alcançando ao menos 3 palavras
+# dele. Adjetivo solto ("inexistente", "indevido") e "NÃO CONHECIDO." de ementa não contam.
+_RE_NEG_OPERADOR = re.compile(r"(?<![a-z0-9])(?:nao|jamais|nunca|nem|descabe|descabid[oa]s?|incabive(?:l|is)|afasta-se|afasto|afastad[oa]s?|rejeita-se|rejeito|rejeitad[oa]s?|nego|negou|negar|nega-se|negam|improcede|julg(?:ou|o|ar|aram|ada|ado|ados|adas)\s+improcedentes?|inexist(?:e|em|ir|iu|indo)|carece|carecem|impossibilidade de)(?![a-z0-9])", _A)
+# "não havendo dúvida de que X" / "não há dúvida de que X" afirmam X (achado no STJ, 05/10/2026)
+_RE_NEG_FALSA = re.compile(r"\s*(?:obstante|so\b|apenas|somente|se\s+confunde|(?:havendo|ha|houve|resta|restam|restando|pairam?)\s+(?:qualquer\s+|mais\s+)?duvidas?)", _A)
+_RE_QUEBRA_ORACAO = re.compile(r"[.;:]|,\s*(?:mas|e|ou|que|o que|de forma|de modo|sendo|alem|conforme|porque|pois|porquanto|embora|ainda|razao pela|motivo pelo|[a-z]+ndo)(?![a-z0-9])|\smas\s", _A)
+_NEGACAO_JANELA, _NEGACAO_ALCANCE_MIN = 80, 3
+
+
+def _negacao_escopo(tn: str, ini0: int, fim: int, bruto: str | None = None) -> bool:
+    jan = tn[max(0, ini0 - _NEGACAO_JANELA):ini0]
+    op = None
+    for m in _RE_NEG_OPERADOR.finditer(jan):
+        if m.group(0) == "nao" and _RE_NEG_FALSA.match(jan, m.start() + 3):
+            continue
+        op = m
+    if op is None:
+        return False
+    ponte = jan[op.end():]
+    if re.search(r"[.;:]", ponte):
+        return False
+    if "," in ponte and len(ponte.strip(" ")) > 15:
+        return False
+    tr = tn[ini0:fim]
+    # trecho que começa pela conjunção "e" não está no alcance; "é" (verbo) está — olha o caractere ORIGINAL, porque o normalizado
+    # dobra os dois para "e" ("NÃO é devido" citado como "é devido…" passava sem alerta; achado no selftest do TRT14, 05/10/2026)
+    if re.match(r"\s*[eE][\s,]", bruto[ini0:fim] if bruto is not None else tr):
+        return False
+    q = _RE_QUEBRA_ORACAO.search(tr)
+    seg = tr if q is None else tr[:q.start()]
+    return len([w for w in seg.strip(" ").split(" ") if w]) >= _NEGACAO_ALCANCE_MIN
+
+
+# ENTRE ASPAS: pareia as aspas no documento inteiro e alerta quando a maioria dos caracteres do trecho está dentro de citação.
+# Diferença do TJRO (medida no gabarito cego dos irmãos, 05/10/2026): o PDF do STJ e o HTML do TRT14 misturam aspa curva de
+# abertura com reta de fechamento, e uma aspa reta solta invertia a alternância do resto do documento. Aqui a aspa reta é
+# orientada pelo vizinho (espaço antes = abre; espaço/pontuação depois = fecha) e entra na MESMA pilha das curvas duplas.
+_ASPAS_SPAN_MAX = 6000
+_ABRE_RETA = frozenset(" \t\n\r\u00a0([{\u2014\u2013-:/")
+_FECHA_RETA = frozenset(" \t\n\r\u00a0.,;:)]}!?\u2014\u2013-/")
+
+
+def _trechos_citados(bruto: str) -> list[list[int]]:
+    out, duplas, simples, angulares = [], [], [], []
+    n = len(bruto)
+
+    def fecha(pilha, i):
+        if pilha and i - pilha[-1] > _ASPAS_SPAN_MAX:
+            pilha.clear()  # a abertura mais próxima está longe demais: o que estava aberto era aspa solta
+        if pilha:
+            out.append([pilha.pop(), i + 1])
+
+    for i, c in enumerate(bruto):
+        if c == "\u201c":
+            duplas.append(i)
+        elif c == "\u201d":
+            fecha(duplas, i)
+        elif c == '"':
+            ant = bruto[i - 1] if i else " "
+            prox = bruto[i + 1] if i + 1 < n else " "
+            abre = ant in _ABRE_RETA and prox not in _FECHA_RETA
+            fech = ant not in _ABRE_RETA and prox in _FECHA_RETA
+            if abre or (not fech and not duplas):
+                duplas.append(i)
+            elif duplas:
+                fecha(duplas, i)
+        elif c == "\u2018":
+            simples.append(i)
+        elif c == "\u2019":
+            if simples:
+                fecha(simples, i)
+        elif c == "\u00ab":
+            angulares.append(i)
+        elif c == "\u00bb":
+            fecha(angulares, i)
+    return out
+
+
+def _cobertura_citada(cit, ini: int, fim: int) -> int:
+    pedacos = sorted(([max(x, ini), min(y, fim)] for x, y in cit if min(y, fim) > max(x, ini)), key=lambda p: p[0])
+    total, ate = 0, ini
+    for x, y in pedacos:
+        if y <= ate:
+            continue
+        total += y - max(x, ate)
+        ate = y
+    return total
+
+
+_RE_TESE_PROPRIA_1 = re.compile(r"\btese\s+(?:juridica\s+)?(?:fixada|firmada|proposta)\b|\bfixando a seguinte tese\b|\bseguinte tese\b", _A)
+
+
+def _entre_aspas(bruto: str, tn: str, ini0: int, fim: int, cit=None) -> bool:
+    cit = _trechos_citados(bruto) if cit is None else cit
+    dentro = _cobertura_citada(cit, ini0, fim)
+    abre = next((c for c in cit if c[0] <= ini0 + (fim - ini0) / 2 and c[1] >= ini0), None)
+    return dentro * 2 > fim - ini0 and not (abre and _RE_TESE_PROPRIA_1.search(tn[max(0, abre[0] - 80):abre[0]]))
+# ------------------------------------------------ fim do porte ---
+
+
+
+
+def _normalizar_casamento(t: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", norm(t)))
+
+
+def _faixa_norm(nt: str, fragmentos: list[str], perto_de: float = 0.0) -> tuple[int, int] | None:
+    lista = [_normalizar_casamento(f).split() for f in fragmentos]
+    lista = [p for p in lista if p]
+    if not lista:
+        return None
+    pad = lambda ps: re.compile(r"(?<![a-z0-9])" + r"[^a-z0-9]+".join(re.escape(x) for x in ps) + r"(?![a-z0-9])")
+    inicios = [m.start() for m in pad(lista[0]).finditer(nt)]
+    if not inicios:
+        return None
+    alvo = perto_de * len(nt)
+    pos = min(inicios, key=lambda i: abs(i - alvo))
+    ini, fim = None, None
+    for ps in lista:
+        m = pad(ps).search(nt, pos)
+        if not m:
+            return None
+        if ini is None:
+            ini = m.start()
+        fim = m.end()
+        pos = m.end()
+    return (ini, fim)
+
+
+_RE_OBITER = re.compile(r"(?<![a-z0-9])(?:ainda que assim nao fosse|se assim nao fosse|(?:ainda|mesmo) que (?:se )?(?:admitisse(?:mos)?|superad[ao]s?|ultrapassad[ao]s?|afastad[ao]s?|entendesse(?:mos)?|considerasse(?:mos)?|fosse|houvesse|pudesse)|a titulo de (?:argumentacao|reforco|ilustracao|obiter dictum)|(?:apenas|somente|so) para argumentar|ad argumentandum(?: tantum)?|por amor ao debate|obiter dictum|caso se entendesse)(?![a-z0-9])", _A)
+_OBITER_JANELA, _OBITER_CABECA = 400, 0.4
+
+
+def _obiter_antes(tn: str, ini0: int, fim: int, bruto: str):
+    cabeca = ini0 + int((fim - ini0) * _OBITER_CABECA)
+    piso = max(0, ini0 - _OBITER_JANELA)
+    frase0 = _inicio_da_frase(bruto, tn, piso, cabeca)
+    m = None
+    for x in _RE_OBITER.finditer(tn[frase0:cabeca]):
+        m = x
+    return m.group(0) if m else None
+
+
 def conferir(texto: str, trecho: str, tribunal: str = "TNU", com_atribuicao: bool = True) -> dict[str, Any]:
     """Conferência literal por palavra inteira; `[...]` separa fragmentos que devem vir em ordem,
     a no máximo VAO_MAXIMO caracteres um do outro (determinação 4: até a v1.0.0 duas palavras
@@ -708,24 +963,23 @@ def conferir(texto: str, trecho: str, tribunal: str = "TNU", com_atribuicao: boo
         if div and any(b > div[0] for _, b in spans):
             alertas.append("VOTO DIVERGENTE: o trecho vem depois de um sinal de divergência no acórdão (pedido de vênia, voto "
                            "vencido ou voto-vista). Pode ser o voto VENCIDO — leia quem venceu antes de citar como entendimento do órgão.")
-    if not em_transcricao:  # aspas se checam SEMPRE, inclusive na ementa (Súmula do STJ transcrita não é palavra do órgão)
-        antes_q, depois_q = tn[max(0, ini0 - 1200): ini0], tn[pos: pos + 1200]
-        aspas = [m.start() for m in re.finditer(r"(?<![a-z])'|'(?![a-z])", antes_q)]
-        n_q = len(aspas)
-        abre = aspas[-1] if aspas else 0
-        # tese do próprio colegiado só desliga o alerta se estiver logo antes da aspa que FICOU ABERTA (red team 22/09, 3)
-        if n_q % 2 == 1 and re.search(r"'(?![a-z])", depois_q) and not _RE_TESE_PROPRIA.search(antes_q[max(0, abre - 80): abre]):
+    # v1.2.0 (06/10/2026): regras do TJRO v1.13/1.15 sobre _norm1(bruto) (1:1), localizando o trecho perto do casamento oficial
+    bruto = str(texto or "")
+    nt = _norm1(bruto)
+    fx = _faixa_norm(nt, frags, (ini0 or 0) / max(1, len(tn)))
+    if not em_transcricao and fx:  # aspas se checam SEMPRE, inclusive na ementa (Súmula do STJ transcrita não é palavra do órgão)
+        if _entre_aspas(bruto, nt, fx[0], fx[1]):
             alertas.append(f"ENTRE ASPAS: o trecho parece estar dentro de aspas no acórdão — é o tribunal citando alguém (doutrina, "
                            f"lei, decisão recorrida, outro julgado). Confira de quem é a frase antes de atribuí-la à {tribunal}.")
-        if com_atribuicao:
-            jan = tn[max(0, ini0 - 400): ini0]
-            ult = max((x.end() for x in _RE_ALEGACAO.finditer(jan)), default=-1)
-            if ult >= 0 and _RE_QUEM_ALEGA.search(jan[max(0, ult - 160): ult + 160]) and not _RE_VOZ_PROPRIA.search(jan[ult:]):
-                alertas.append("ALEGAÇÃO DA PARTE: pouco antes do trecho o texto relata o que uma parte (INSS, União, recorrente…) "
-                               "sustenta/alega — o trecho pode ser tese da parte, não decisão do tribunal. Confira no relatório/voto quem fala.")
-    antes = tn[max(0, (ini0 or 0) - 90): ini0 or 0]
-    if _RE_NEGACAO.search(antes) and not _RE_NEGACAO_FALSA.search(antes[-40:]):
-        alertas.append("NEGAÇÃO: há negativa logo antes do trecho — o recorte pode inverter o julgado. Não citar sem ler.")
+        if com_atribuicao and _alegacao_da_parte(nt, fx[0], fx[1], bruto):
+            alertas.append("ALEGAÇÃO DA PARTE: o texto relata o que uma parte (INSS, União, recorrente…) sustenta, alega ou requer logo antes "
+                           "do trecho — o trecho pode ser tese da parte, não decisão do tribunal. Confira no relatório/voto quem fala.")
+    if fx and _negacao_escopo(nt, fx[0], fx[1], bruto):
+        alertas.append("NEGAÇÃO: há negativa logo antes do trecho — o recorte pode inverter o julgado. Não citar sem ler a frase inteira.")
+    ob = _obiter_antes(nt, fx[0], fx[1], bruto) if (com_atribuicao and not em_transcricao and fx and not any(a.startswith("ENTRE ASPAS") for a in alertas)) else None
+    if ob:
+        alertas.append(f"OBITER DICTUM?: o trecho vem sob «{ob}» — raciocínio hipotético ou fundamento alternativo; o resultado do "
+                       "julgado não dependeu dele. Vale como reforço, não como ratio decidendi; cite dizendo que é obiter.")
     return {"ok": True, "alertas": alertas, "contexto": re.sub(r"\s+", " ", tn[max(0, (ini0 or 0) - 120): pos + 120]),
             "spans": spans, "tn": tn}
 
@@ -2607,7 +2861,7 @@ if __name__ == "__main__":
         # tese fixada pelo PRÓPRIO colegiado entre aspas: NÃO é "ENTRE ASPAS" (TNU cita a si mesma)
         r5 = _verificar_trecho(vt2, "o retorno ao trabalho por tentativa não afasta o direito ao benefício", tribunal="TNU")
         assert r5["valido"] and not any(a.startswith("ENTRE ASPAS") for a in r5["alertas"]), r5
-        voto_q = "VOTO. Como ensina a doutrina: 'a boa-fé objetiva impõe deveres anexos de conduta às partes'. Entendo aplicável."
+        voto_q = "VOTO. Como ensina a doutrina: \"a boa-fé objetiva impõe deveres anexos de conduta às partes\". Entendo aplicável."
         r6 = _verificar_trecho({"inteiro teor": voto_q}, "a boa-fé objetiva impõe deveres anexos de conduta", tribunal="TNU")
         assert r6["valido"] and any(a.startswith("ENTRE ASPAS") for a in r6["alertas"]), r6
         # na ementa não se analisa transcrição (só NEGAÇÃO): ✅ limpo
@@ -2703,8 +2957,8 @@ if __name__ == "__main__":
                    "provimento.\nBrasília, 14 de maio de 2025.")
         assert _fecho_tnu(it_prec)["data_fecho"] == "14/05/2025", _fecho_tnu(it_prec)
         # 3. tese própria só desliga ENTRE ASPAS da aspa que ficou aberta; doutrina em seguida ainda alerta
-        r_t = _verificar_trecho({"inteiro teor": "Tese fixada: 'o prazo decadencial não se aplica ao pedido de revisão'. Ademais, "
-                                 "conforme a doutrina, 'o prazo decadencial é de dez anos para revisão de benefício'."},
+        r_t = _verificar_trecho({"inteiro teor": "Tese fixada: \"o prazo decadencial não se aplica ao pedido de revisão\". Ademais, "
+                                 "conforme a doutrina, \"o prazo decadencial é de dez anos para revisão de benefício\"."},
                                 "o prazo decadencial é de dez anos", tribunal="TNU")
         assert r_t["valido"] and any(a.startswith("ENTRE ASPAS") for a in r_t["alertas"]), r_t
         # 4. ENTRE ASPAS também na ementa (Súmula 111 do STJ transcrita não é palavra do TRF1)

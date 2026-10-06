@@ -1,5 +1,8 @@
 # Histórico
 
+- **v1.2.2 (06/10/2026)** — o recibo leva `trechos_obiter` (frases do inteiro teor sob marca de obiter) para o lint da
+  `peticao-rg`; trecho com "nº" passa a ser localizado (antes, aspas/alegação/negação/obiter ficavam calados nele); "ainda que
+  assim não fosse" não conta como negação. Paridade Python×Node: 5.062 conferências e os blocos de obiter idênticos.
 - **v1.2.1 (06/10/2026)** — correção: o Python não tinha "sem razão" como operador de NEGAÇÃO e a extensão tinha (a regra entrou nos outros
   servidores antes do porte do TRF1, e o Python copiou o bloco antigo). Agora os dois avisam; caso novo no selftest e no teste do Node.
 - **v1.2.0 (06/10/2026)** — regras de atribuição do TJRO v1.13/1.15 (aspas, alegação, negação) e o alerta OBITER DICTUM?.

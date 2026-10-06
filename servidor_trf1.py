@@ -49,7 +49,7 @@ import unicodedata
 import urllib.parse
 from typing import Any
 
-VERSAO = "1.2.1"
+VERSAO = "1.2.2"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -782,7 +782,7 @@ def _alegacao_da_parte(tn: str, ini0: int, fim: int | None = None, bruto: str | 
 # dele. Adjetivo solto ("inexistente", "indevido") e "NÃO CONHECIDO." de ementa não contam.
 _RE_NEG_OPERADOR = re.compile(r"(?<![a-z0-9])(?:nao|jamais|nunca|nem|descabe|descabid[oa]s?|incabive(?:l|is)|afasta-se|afasto|afastad[oa]s?|rejeita-se|rejeito|rejeitad[oa]s?|nego|negou|negar|nega-se|negam|improcede|julg(?:ou|o|ar|aram|ada|ado|ados|adas)\s+improcedentes?|inexist(?:e|em|ir|iu|indo)|carece|carecem|impossibilidade de|sem razao|sem razoes)(?![a-z0-9])", _A)
 # "não havendo dúvida de que X" / "não há dúvida de que X" afirmam X (achado no STJ, 05/10/2026)
-_RE_NEG_FALSA = re.compile(r"\s*(?:obstante|so\b|apenas|somente|se\s+confunde|(?:havendo|ha|houve|resta|restam|restando|pairam?)\s+(?:qualquer\s+|mais\s+)?duvidas?)", _A)
+_RE_NEG_FALSA = re.compile(r"\s*(?:obstante|so\b|apenas|somente|se\s+confunde|fosse\b|(?:havendo|ha|houve|resta|restam|restando|pairam?)\s+(?:qualquer\s+|mais\s+)?duvidas?)", _A)
 _RE_QUEBRA_ORACAO = re.compile(r"[.;:]|,\s*(?:mas|e|ou|que|o que|de forma|de modo|sendo|alem|conforme|porque|pois|porquanto|embora|ainda|razao pela|motivo pelo|[a-z]+ndo)(?![a-z0-9])|\smas\s", _A)
 _NEGACAO_JANELA, _NEGACAO_ALCANCE_MIN = 80, 3
 
@@ -881,7 +881,9 @@ def _entre_aspas(bruto: str, tn: str, ini0: int, fim: int, cit=None) -> bool:
 
 
 def _normalizar_casamento(t: str) -> str:
-    return " ".join(re.findall(r"[a-z0-9]+", norm(t)))
+    # a MESMA dobra do texto (_norm1): com norm() o "º" de "nº" sumia aqui e virava "o" lá, e o trecho com "nº" não era
+    # localizado — aspas, alegação, negação e obiter ficavam calados (achado em 06/10/2026)
+    return " ".join(re.findall(r"[a-z0-9]+", _norm1(t)))
 
 
 def _faixa_norm(nt: str, fragmentos: list[str], perto_de: float = 0.0) -> tuple[int, int] | None:
@@ -910,6 +912,30 @@ def _faixa_norm(nt: str, fragmentos: list[str], perto_de: float = 0.0) -> tuple[
 _RE_OBITER = re.compile(r"(?<![a-z0-9])(?:ainda que assim nao fosse|se assim nao fosse|(?:ainda|mesmo) que (?:se )?(?:admitisse(?:mos)?|superad[ao]s?|ultrapassad[ao]s?|afastad[ao]s?|entendesse(?:mos)?|considerasse(?:mos)?|fosse|houvesse|pudesse)|a titulo de (?:argumentacao|reforco|ilustracao|obiter dictum)|(?:apenas|somente|so) para argumentar|ad argumentandum(?: tantum)?|por amor ao debate|obiter dictum|caso se entendesse)(?![a-z0-9])", _A)
 _OBITER_JANELA, _OBITER_CABECA = 400, 0.4
 
+
+
+def _trechos_obiter(texto: str, ini: int = 0, fim: int | None = None) -> list[str]:
+    """Recibo (06/10/2026, espelho de faixasObiter do TJRO 1.16): da marca de obiter ao fim da frase, em BRUTO, fora de citação
+    entre aspas (lá a marca é de quem o tribunal cita). O lint da peticao-rg avisa quando a frase citada está num destes."""
+    fim = len(texto) if fim is None else fim
+    nt = _norm1(texto)
+    cit = [c for c in _trechos_citados(texto) if c[1] > ini and c[0] < fim]
+    out, ate = [], -1
+    for m in _RE_OBITER.finditer(nt, ini):
+        if m.start() >= fim:
+            break
+        if m.start() < ate or any(a <= m.start() < b for a, b in cit):
+            continue
+        b = min(fim, m.start() + 600)
+        for f in re.finditer(r"[.;!?][\"”’)\]]?\s+(?=[\"“‘(\[]?[A-ZÀ-Ý0-9])", texto[m.end():b]):
+            p = m.end() + f.start()
+            if f.group(0)[0] == "." and re.search(r"(?:^|[^a-z0-9])(?:art|arts|n|no|nos|fl|fls|id|ids|des|dr|min|rel|inc|p|pp|proc|cf|res|sum|v|vol|al|ss)$", nt[max(0, p - 8):p]):
+                continue
+            b = p + 1
+            break
+        out.append(texto[m.start():b])
+        ate = b
+    return out
 
 def _obiter_antes(tn: str, ini0: int, fim: int, bruto: str):
     cabeca = ini0 + int((fim - ini0) * _OBITER_CABECA)
@@ -1126,7 +1152,7 @@ def _campos_de_custodia(d: dict) -> dict:
         "texto": texto, "ementa": d.get("ementa") or "", "dispositivo": d.get("decisao") or "",
         "inteiro_teor_incluido": bool(it),
         "inteiro_teor": it,  # campo próprio: a atribuição roda sobre o MESMO texto que o portal deu (red team 22/09, 5)
-        "trechos_transcritos": transcritos, "trecho_divergente": divergente,
+        "trechos_transcritos": transcritos, "trecho_divergente": divergente, "trechos_obiter": _trechos_obiter(it) if it else [],
         "normalizacao": "trechos em bruto, recortados de `texto` — normalize com a sua própria função",
         "sha256": hashlib.sha256(texto.encode("utf-8")).hexdigest(),
         "versao_servidor": VERSAO,

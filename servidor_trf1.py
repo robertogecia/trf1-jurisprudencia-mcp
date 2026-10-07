@@ -49,7 +49,7 @@ import unicodedata
 import urllib.parse
 from typing import Any
 
-VERSAO = "1.3.0"
+VERSAO = "1.4.0"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -980,6 +980,26 @@ def _negacao_escopo(tn: str, ini0: int, fim: int, bruto: str | None = None) -> b
     seg = tr if q is None else tr[:q.start()]
     return len([w for w in seg.strip(" ").split(" ") if w]) >= _NEGACAO_ALCANCE_MIN
 
+# NEGAÇÃO forte × distante (07/10/2026, gabarito cego e duplo neg-val2: 120 trechos novos de TJRO, TJSE, STJ, TCE-RO e TED-OAB,
+# ponderado pela população): com a negação colada ao trecho (até 1 palavra antes) ou existencial ("não há/houve/existe …", até 5),
+# precisão 80% e falso alarme 6%; a regra larga sozinha dava 50% e 33%. O resto que a regra larga pega continua avisado, como
+# "NEGAÇÃO (distante)?", para não perder cobertura (72% somadas; só a forte, 53%).
+_RE_NEG_EXISTENCIAL = re.compile(r"[ \t\n\r\f\v]*(?:ha|houve|havia|existe|existem|existia)(?![a-z0-9])")
+
+
+def _negacao_proxima(tn: str, ini0: int) -> bool:
+    jan = tn[max(0, ini0 - _NEGACAO_JANELA):ini0]
+    op = None
+    for m in _RE_NEG_OPERADOR.finditer(jan):
+        if m.group(0) == "nao" and _RE_NEG_FALSA.match(jan, m.start() + 3):
+            continue
+        op = m
+    if op is None:
+        return False
+    ponte = jan[op.end():]
+    n = len(re.findall(r"[^ \t\n\r\f\v]+", ponte))
+    return n <= 1 or (n <= 5 and _RE_NEG_EXISTENCIAL.match(ponte) is not None)
+
 
 # ENTRE ASPAS: pareia as aspas no documento inteiro e alerta quando a maioria dos caracteres do trecho está dentro de citação.
 # Diferença do TJRO (medida no gabarito cego dos irmãos, 05/10/2026): o PDF do STJ e o HTML do TRT14 misturam aspa curva de
@@ -1171,7 +1191,8 @@ def conferir(texto: str, trecho: str, tribunal: str = "TNU", com_atribuicao: boo
             alertas.append("ALEGAÇÃO DA PARTE: o texto relata o que uma parte (INSS, União, recorrente…) sustenta, alega ou requer logo antes "
                            "do trecho — o trecho pode ser tese da parte, não decisão do tribunal. Confira no relatório/voto quem fala.")
     if fx and _negacao_escopo(nt, fx[0], fx[1], bruto):
-        alertas.append("NEGAÇÃO: há negativa logo antes do trecho — o recorte pode inverter o julgado. Não citar sem ler a frase inteira.")
+        alertas.append("NEGAÇÃO: há negativa logo antes do trecho — o recorte pode inverter o julgado. Não citar sem ler a frase inteira."
+                       if _negacao_proxima(nt, fx[0]) else "NEGAÇÃO (distante)?: há uma negativa algumas palavras antes do trecho, fora dele. Na maioria das vezes ela fecha a própria oração e não inverte o recorte (medido às cegas), mas leia a frase inteira antes de citar.")
     ob = _obiter_antes(nt, fx[0], fx[1], bruto) if (com_atribuicao and not em_transcricao and fx and not any(a.startswith("ENTRE ASPAS") for a in alertas)) else None
     if ob:
         alertas.append(f"OBITER DICTUM?: o trecho vem sob «{ob}» — raciocínio hipotético ou fundamento alternativo; o resultado do "

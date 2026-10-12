@@ -52,7 +52,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 
-VERSAO = "1.5.1"
+VERSAO = "1.5.2"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -2707,7 +2707,9 @@ def _tipo_do_erro(m: str) -> str:
     if re.search(r"tempo esgotado|timed? ?out", m, re.I): return "timeout"
     mm = re.search(r"\bHTTP (\d{3})\b|Server error '(\d{3})", m)
     if mm: return "http_" + (mm.group(1) or mm.group(2))
-    if re.search(r"ConnectError|ReadError|certificate|CERT_|getaddrinfo|Name or service|Connection (?:refused|reset)", m, re.I): return "rede_ou_certificado"
+    if re.search(r"certificate|CERT_|SSL|TLS|self[- ]signed", m, re.I): return "certificado"
+    if re.search(r"getaddrinfo|Name or service|Connection refused|Network is unreachable|No route to host", m, re.I): return "dns_ou_rede_local"
+    if re.search(r"ConnectError|ReadError|Connection reset|RemoteProtocolError|socket", m, re.I): return "conexao_interrompida"
     if re.search(r"sess[ãa]o|ViewState|resposta inesperada|n[ãa]o reconhec", m, re.I): return "resposta_inesperada"
     return "outro"
 
@@ -2805,6 +2807,9 @@ _CAUSAS_ERRO = {
     "desafio_navegador": ("O portal pediu verificação de navegador (Cloudflare/WAF).", "Use o site pelo navegador; esta extensão não contorna.", "portal"),
     "portal_congestionado": ("O portal respondeu \"Muitos Usuários\" (congestionamento do CJF).", "Tente de novo em alguns minutos; não é erro da extensão.", "portal"),
     "timeout": ("O portal demorou mais que o limite.", "Repita com por_pagina menor ou mais tarde.", "portal"),
+    "certificado": ("Certificado TLS recusado (antivírus, proxy ou data do computador errada).", "Verifique a data/hora do computador e se há antivírus ou proxy inspecionando HTTPS.", "usuario"),
+    "dns_ou_rede_local": ("Sem rede, DNS ou rota até o portal (lado do seu computador).", "Confira a internet/VPN/proxy; teste o portal no navegador.", "usuario"),
+    "conexao_interrompida": ("A conexão caiu no meio: pode ser o portal fora do ar ou a rede.", "Espere alguns minutos e tente UMA vez; se o portal abre no navegador e a extensão não, relate com o relatório.", "portal"),
     "rede_ou_certificado": ("Falha de rede, DNS ou certificado.", "Confira a conexão/VPN/proxy. Se só esta extensão falha, relate.", "usuario"),
     "resposta_inesperada": ("O portal respondeu num formato que a extensão não reconhece.", "Pode ser mudança no portal: envie o relatório ao autor.", "autor"),
     "outro": ("Erro não classificado.", "É o mais útil para o autor: envie o relatório.", "autor"),
@@ -3002,6 +3007,16 @@ async def _linha_do_tempo(consulta: str, grupos, orgao_julgador, ano_inicio, ano
     return _formatar_linha_do_tempo(linhas, filtros)
 
 
+def _validar_origem(v: str) -> str:
+    """O campo "Origem" do portal é o TRIBUNAL de origem ("TRF - PRIMEIRA REGIÃO"); UF e seção judiciária nunca casam
+    (medido 12/10/2026). Recusa antes de gastar requisição."""
+    f = _fold(v).strip()
+    if re.fullmatch(r"[a-z]{2}", f) or re.search(r"secao|subsecao|judiciari|rondonia|estado de", f):
+        return (f'o filtro origem não aceita estado nem seção judiciária ("{v[:40]}"): ele casa o TRIBUNAL de origem ("TRF - PRIMEIRA REGIÃO"). '
+                "Nada foi consultado. Refaça sem origem; a unidade aparece nos 4 últimos dígitos do número CNJ de cada resultado (ex.: .4.01.4100).")
+    return ""
+
+
 def _erro_de_parametro(e) -> str:
     return (f"Erro de parâmetro (nada foi consultado): {e}\n"
             "Corrija a chamada e refaça — não registre como pesquisa realizada nem como \"não localizado\".")
@@ -3068,6 +3083,10 @@ async def _buscar(consulta: str, tipo, fonte, grupos, relator, orgao_julgador, c
                              ("referencia_legislativa", referencia_legislativa)):
             if valor and str(valor).strip():
                 avancados[chave] = str(valor).strip()
+        if avancados.get("origem"):
+            _msg_origem = _validar_origem(avancados["origem"])
+            if _msg_origem:
+                raise ValueError(_msg_origem)
         if data_inicio:
             avancados["data_inicio"] = _normalizar_data(str(data_inicio), "data_inicio")
         if data_fim:
@@ -4280,6 +4299,9 @@ if __name__ == "__main__":
         _hint = _format_busca([], 0, {"consulta_montada": "x", "pagina": 1, "por_pagina": 10, "filtros": {"origem": "RO"}, "base": "trf1"})
         assert "TRIBUNAL de origem" in _hint and "nunca casam" in _hint
         assert "TRIBUNAL de origem" not in _format_busca([], 0, {"consulta_montada": "x", "pagina": 1, "por_pagina": 10, "filtros": {}, "base": "trf1"})
+        assert _validar_origem("RO") and _validar_origem("SEÇÃO JUDICIÁRIA DE RONDÔNIA") and _validar_origem("Rondônia") and not _validar_origem("TRF - PRIMEIRA REGIÃO") and not _validar_origem("PRIMEIRA")
+        assert "Nada foi consultado" in asyncio.run(_buscar("x", None, None, None, None, None, None, "RO", None, None, None, None, None, "julgamento", 1, 10, "trf1", None))
+        assert _tipo_do_erro("getaddrinfo failed") == "dns_ou_rede_local" and _tipo_do_erro("certificate verify failed") == "certificado" and _tipo_do_erro("ConnectError") == "conexao_interrompida"
         print("selftest offline OK")
 
         if "--online" in sys.argv:

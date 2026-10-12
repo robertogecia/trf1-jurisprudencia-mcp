@@ -52,7 +52,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 
-VERSAO = "1.5.2"
+VERSAO = "1.5.3"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -1416,8 +1416,29 @@ def _ancoras(texto: str, max_itens: int = _ANCORAS_MAX) -> list[str]:
     return [nome for nome, _ in sorted(achado.items(), key=lambda kv: kv[1])][:max_itens]
 
 
+_RE_SESSAO_DATA = re.compile(r"sess[ãa]o[^.]{0,70}?(\d{2}/\d{2}/\d{4})(?:\s*(?:a|à|até|e)\s*(\d{2}/\d{2}/\d{4}))?", re.I)
+
+
+def _aviso_data_sessao(d: dict) -> str:
+    """A data de "Julgamento" do índice pode não ser a da sessão (relato de 12/10/2026: índice 04/02/2026, dispositivo "sessão virtual de
+    21/07/2025 a 25/07/2025"). Só avisa; quem manda é o dispositivo/inteiro teor."""
+    idx = _data_iso(d.get("data_fecho") or d.get("data_julgamento") or "")
+    m = _RE_SESSAO_DATA.search(_limpar(d.get("decisao") or "", 0))
+    if not idx or not m:
+        return ""
+    ini, fim = _data_iso(m.group(1)), _data_iso(m.group(2) or m.group(1))
+    if not ini or not fim or ini <= idx <= fim:
+        return ""
+    cit = m.group(1) + (f" a {m.group(2)}" if m.group(2) else "")
+    return (f"⚠️ Data do índice ({idx[8:]}/{idx[5:7]}/{idx[:4]}) diverge da sessão citada no dispositivo ({cit}): para citar a data do julgamento, "
+            "confira no inteiro teor ou na ata.")
+
+
 def _linhas_de_sinais(d: dict) -> list[str]:
     linhas: list[str] = []
+    _ad = _aviso_data_sessao(d)
+    if _ad:
+        linhas.append(_ad)
     tipo = _fold(d.get("tipo") or "")
     if "monocrat" in tipo or "presid" in tipo:
         linhas.append("⚠️ decisão monocrática/da presidência: não é precedente do colegiado — serve para ver como o relator decide, não para citar como jurisprudência do órgão.")
@@ -1652,6 +1673,12 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
         linhas.append(
             "Dica: total alto — restrinja com `E` (ex.: `\"dano moral\" E negativação`), com "
             "`grupos`, com `[EMEN]` para buscar só na ementa, ou com filtro de órgão/relator/data."
+        )
+    _org = _fold((filtros or {}).get("orgao_julgador") or "")
+    if "recursal" in _org and base == "trf1":
+        linhas.append(
+            "⚠️ O filtro de órgão casa por TRECHO do nome. Em 2026 parte das Turmas Recursais aparece com nome novo (ex.: \"PRIMEIRA TURMA 4.0 - ADJUNTA A TR-AC\", "
+            "medido em 12/10/2026) e fica de fora de \"TURMA RECURSAL\". Para cobrir os dois nomes, filtre por \"PRIMEIRA TURMA\" (ou o trecho comum) e identifique a unidade pelo número CNJ."
         )
     if not docs and not total and (filtros or {}).get("origem"):
         linhas.append(
@@ -2016,7 +2043,7 @@ def _reservar_requisicao(agora: float | None = None) -> dict:
                 f"Muitas consultas em pouco tempo (limite atual: {_JANELA_MAX_REQS} requisições a cada "
                 f"{_fmt_hms(janela)}, compartilhado por todos os processos desta extensão nesta máquina; "
                 "cada busca gasta 2 a 4). "
-                f"Aguarde {_fmt_hms(espera)} e tente de novo."
+                f"Aguarde {_fmt_hms(math.ceil(max(espera, 1)))} e tente de novo (esta tentativa não gastou requisição)."
             )}
         vaga = max(agora, e["proximo_livre_em"])
         esperar = vaga - agora
@@ -4302,6 +4329,10 @@ if __name__ == "__main__":
         assert _validar_origem("RO") and _validar_origem("SEÇÃO JUDICIÁRIA DE RONDÔNIA") and _validar_origem("Rondônia") and not _validar_origem("TRF - PRIMEIRA REGIÃO") and not _validar_origem("PRIMEIRA")
         assert "Nada foi consultado" in asyncio.run(_buscar("x", None, None, None, None, None, None, "RO", None, None, None, None, None, "julgamento", 1, 10, "trf1", None))
         assert _tipo_do_erro("getaddrinfo failed") == "dns_ou_rede_local" and _tipo_do_erro("certificate verify failed") == "certificado" and _tipo_do_erro("ConnectError") == "conexao_interrompida"
+        assert "diverge da sessão" in _aviso_data_sessao({"data_julgamento": "04/02/2026", "decisao": "Decide a Turma, por unanimidade, na sessão virtual de 21/07/2025 a 25/07/2025, negar provimento."})
+        assert _aviso_data_sessao({"data_julgamento": "23/07/2025", "decisao": "Na sessão virtual de 21/07/2025 a 25/07/2025, por unanimidade."}) == ""
+        assert _aviso_data_sessao({"data_julgamento": "04/02/2026", "decisao": "por unanimidade, negar provimento"}) == ""
+        assert "TRECHO do nome" in _format_busca([], 0, {"consulta_montada": "x", "pagina": 1, "por_pagina": 10, "filtros": {"orgao_julgador": "PRIMEIRA TURMA RECURSAL"}, "base": "trf1"})
         print("selftest offline OK")
 
         if "--online" in sys.argv:

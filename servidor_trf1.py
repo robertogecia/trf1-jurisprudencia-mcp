@@ -1310,7 +1310,12 @@ def _votacao_declarada(texto: str) -> str:
     if not texto:
         return ""
     p = _fold(re.sub(r"\s+", " ", _limpar(texto, 0)))[:1500].upper()
-    maioria = bool(re.search(r"\bMAIORIA\b", p)) or bool(_RE_VENCIDO.search(p))
+    mp = re.search(r"\b(?:DECIDE|DECIDIU|DECIDEM|ACORDA|ACORDAM|DECIDIRAM)\b[^.]{0,80}?\b(UNANIMIDADE|MAIORIA|UNANIME|UNANIMEMENTE)\b|\bPOR (UNANIMIDADE|MAIORIA)\b", p)
+    nucleo = (mp.group(1) or mp.group(2)) if mp else ""   # a palavra da PROCLAMAÇÃO manda; "maioria"/"vencido" em outro contexto não vira votação
+    if nucleo:
+        maioria = nucleo == "MAIORIA" or bool(re.search(r"\bVENCID[OA]S?\s+(?:O|A|OS|AS)\s+(?:DES|DESEMBARGADOR|JUIZ|MIN|RELATOR|EXMO)", p))
+    else:
+        maioria = bool(re.search(r"\bMAIORIA\b", p)) or bool(_RE_VENCIDO.search(p))
     if maioria:
         v = "por maioria, voto divergente prevaleceu" if _RE_DIVERGENTE_PREV.search(p) and not re.search(r"VENCIDO[^.]{0,40}DIVERGENTE", p) else "por maioria"
     elif re.search(r"UNANIMIDADE|\bUNANIME\b|\bUNANIMEMENTE\b", p):
@@ -1364,10 +1369,10 @@ def _fatos_do_julgado(it: str):
                 return ("ementa › caso em exame", txt[:_FATOS_MAX])
     mr = re.search(r"(?m)^[ \t]*RELAT[ÓO]RIO[ \t]*$", it[:6000])
     if mr:
-        mv = re.compile(r"(?m)^[ \t]*VOTO\b[^\n]*$").search(it, mr.end())
+        mv = re.compile(r"(?mi)^[ \t]*VOTO\b[^\n]*$|\b[ÉEé]\s+o\s+(?:breve\s+)?relat[óo]rio\b").search(it, mr.end())
         fim = mv.start() if mv else min(len(it), mr.end() + _FATOS_MAX)
         txt = _RE_LIXO_WORD.sub("", it[mr.end():fim].strip(" \t\n:.-")).strip()
-        if len(txt) > 40:
+        if len(txt) > 40 and not re.search(r"(?i)relat[óo]rio\s+(?:formal\s+)?dispensad[oa]|dispensad[oa]\s+o\s+relat[óo]rio|dispens[ao]\s+o\s+relat[óo]rio", txt[:200]):
             return ("relatório do acórdão", txt[:_FATOS_MAX])
     return ""
 
@@ -2544,7 +2549,7 @@ def _regex_termo(t: str):
     """Termo → regex sobre texto normalizado. `$`/`*` no fim = radical; frase com espaço = palavras vizinhas, em ordem."""
     t = norm(str(t or "")).strip()
     radical = t.endswith("$") or t.endswith("*")
-    partes = [re.escape(x) for x in re.split(r"[^a-z0-9]+", t) if x]
+    partes = [re.escape(x) for x in re.split(r"[^a-z0-9]+", t) if x]   # "$" ou "*" sozinhos não têm letra: viram None (termo ausente)
     if not partes:
         return None
     corpo = r"[^a-z0-9]+".join(partes)
@@ -2569,7 +2574,11 @@ def _listar_recibos(pasta: str | None = None) -> list[dict]:
                     rec = None
             if rec and rec.get("id_documento"):
                 rec = dict(rec)
-                rec["_tn"] = norm(rec.get("inteiro_teor") or rec["texto"])
+                for campo in ("id_documento", "nr_processo", "numero", "base", "tipo", "classe", "orgao", "orgao_fonte", "relator", "relator_texto",
+                              "data_julgamento", "obtido_em", "inteiro_teor", "ementa", "dispositivo"):
+                    v = rec.get(campo)
+                    rec[campo] = v if isinstance(v, str) else ("" if v is None else str(v))
+                rec["_tn"] = norm(rec["inteiro_teor"] or rec["texto"])
                 out.append(rec)
     return out
 
@@ -2588,11 +2597,11 @@ def _trecho_em_volta(texto: str, tn: str, rx, largura: int = 160) -> str:
 
 def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_processo: str = "", id_documento: str = "",
                     relator: str = "", base: str = "") -> str:
-    palavras = [p for p in re.split(r"[^a-z0-9*$]+", norm(str(consulta or ""))) if p and p.rstrip("*$") not in _STOP_RECIBOS]
+    palavras = [p for p in re.split(r"[^a-z0-9*$]+", norm(str(consulta or ""))) if p and p.rstrip("*$") and p.rstrip("*$") not in _STOP_RECIBOS]
     gs = []
     if isinstance(grupos, list):
         for g in [g for g in grupos if isinstance(g, list) and g][:RECIBOS_GRUPOS_MAX]:
-            termos = [t for t in (str(x or "").strip() for x in g) if t][:RECIBOS_TERMOS_POR_GRUPO_MAX]
+            termos = [t for t in (str(x or "").strip() for x in g) if t and re.search(r"[A-Za-z0-9À-ÿ]", t)][:RECIBOS_TERMOS_POR_GRUPO_MAX]
             if termos:
                 gs.append(termos)
     dig = _so_digitos(str(nr_processo or ""))
@@ -2677,6 +2686,8 @@ def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_pr
 _ARQUIVO_ERROS = os.environ.get("TRF1_MCP_ARQUIVO_ERROS") or os.path.join(os.path.expanduser("~"), ".trf1-jurisprudencia-erros.jsonl")
 _MAX_LINHAS_ERROS, _MAX_BYTES_ERROS = 500, 400_000
 _VALORES_SEGUROS = {"tipo", "tipo_acordao", "fonte", "base", "tipo_data", "pagina", "por_pagina", "limite", "dias"}
+_LISTA_BRANCA = {"tipo": {"ACORDAO", "SUMULA", "ARGUICAO", "DECISAOMONO", "DECISAOPRES"}, "tipo_acordao": {"REPRESENTATIVO", "RELEVANTE"},
+                 "fonte": {"TRF1", "JEF1"}, "base": {"trf1", "tnu", "colegiado"}, "tipo_data": {"julgamento", "publicacao"}}
 _VERSAO_SERVIDOR = f"python-{VERSAO}"
 _RE_MARC_PARCIAL = re.compile(r"\[PESQUISA (?:NÃO REALIZADA|INCOMPLETA)\b")
 
@@ -2696,13 +2707,17 @@ def _tipo_do_erro(m: str) -> str:
 
 
 def _sanitizar(texto, maximo: int = 300) -> str:
-    t = str(texto if texto is not None else "")
+    t = str(texto if texto is not None else "")[:2000]   # red team 12/10/2026: regex sobre entrada ilimitada travava o servidor
     t = re.sub(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", "<nº-processo>", t)
-    t = re.sub(r"\b\d{20}\b", "<nº-processo>", t)
-    t = re.sub(r"\b\d{8,}\b", "<nº>", t)
-    t = re.sub(r"[\w.+-]+@[\w-]+\.[\w.-]+", "<email>", t)
-    t = re.sub(r"https?://[^\s)\"']+", lambda u: re.sub(r"[?#].*$", "", u.group(0)), t)
-    t = re.sub(r"[\"“”][^\"“”]{4,}[\"“”]", "«…»", t)
+    t = re.sub(r"\b\d{1,7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", "<nº-processo>", t)      # CNJ sem zeros à esquerda
+    t = re.sub(r"\b\d{4}\.\d{2}\.\d{2}\.\d{5,7}-?\d?\b", "<nº-processo>", t)             # numeração antiga do TRF1
+    t = re.sub(r"\d[\d.\-/]{8,40}\d", "<nº>", t)
+    t = re.sub(r"\b\d{7,}\b", "<nº>", t)
+    t = re.sub(r"[\w.+-]{1,64}@[\w-]{1,63}\.[\w.-]{1,100}", "<email>", t)
+    t = re.sub(r"https?://[^\s)\"']{1,300}", lambda u: re.sub(r"[?#;].*$", "", u.group(0)), t)
+    t = re.sub(r"[\"“”][^\"“”\n]{4,200}[\"“”]", "«…»", t)
+    t = re.sub(r"'[^'\n]{4,200}'", "«…»", t)
+    t = re.sub(r"«(?!…»)[^»\n]{1,200}»", "«…»", t)
     return re.sub(r"\s+", " ", t).strip()[:maximo]
 
 
@@ -2712,7 +2727,11 @@ def _descrever_args(args: dict | None) -> dict:
         if v is None or v == "" or v == []:
             continue
         if k in _VALORES_SEGUROS and isinstance(v, (int, str, list)):
-            out[k] = [_sanitizar(x, 40) for x in v] if isinstance(v, list) else (_sanitizar(v, 60) if isinstance(v, str) else v)
+            ok = _LISTA_BRANCA.get(k)
+            conv = lambda x: (x if (ok is None or str(x) in ok) else "<valor fora da lista>") if isinstance(x, (str, int)) and not isinstance(x, bool) else "<valor fora da lista>"
+            out[k] = [conv(x) for x in v][:10] if isinstance(v, list) else conv(v)
+            if ok is None:   # numéricos: só inteiros
+                out[k] = ([x for x in out[k] if isinstance(x, int)] if isinstance(out[k], list) else (out[k] if isinstance(out[k], int) else "<valor fora da lista>"))
         elif isinstance(v, list):
             out[k] = (f"{len(v)} grupo(s), {sum(len(g) for g in v)} termo(s)" if v and isinstance(v[0], list) else f"{len(v)} item(ns)")
         elif isinstance(v, str):
@@ -2766,7 +2785,8 @@ def _diario(f):
             raise
         try:
             if f.__name__ != "diagnostico_erros_trf1" and isinstance(r, str) and _RE_MARC_PARCIAL.search(r) and _tipo_do_erro(r) != "limite_de_ritmo":
-                _registrar_erro(f.__name__, texto=r, args=k, ms=int((time.time() - t0) * 1000), parcial="INCOMPLETA" in r[:40])
+                _mm = re.match(r"\s*\[([^\]]{0,400})\]", r)   # só o motivo entre colchetes: o corpo da resposta traz consulta e filtros
+                _registrar_erro(f.__name__, texto=("[" + _mm.group(1) + "]") if _mm else "[PESQUISA NÃO REALIZADA]", args=k, ms=int((time.time() - t0) * 1000), parcial="INCOMPLETA" in r[:40])
         except Exception:
             pass
         return r
@@ -4215,6 +4235,41 @@ if __name__ == "__main__":
         assert _formatar_linha_do_tempo([{"ano": 2023, "total": 1, "julgamentos": 1, "res": []}], "x", "parou em 2024").startswith("[PESQUISA INCOMPLETA — parou em 2024]")
         assert "Erro de parâmetro" in asyncio.run(_linha_do_tempo("", None, None, None, None))
         assert "Erro de parâmetro" in asyncio.run(_linha_do_tempo("tese", None, None, 2010, 2020)) and "Erro de parâmetro" in asyncio.run(_julgados_que_citam("123", "trf1", 5))
+
+
+        # --- red team 12/10/2026: regressões ---
+        assert _votacao_declarada("Decide a Turma, por unanimidade, negar provimento, nos termos do precedente julgado por maioria (AC 1234).") == "unânime"
+        assert _votacao_declarada("A Turma, por unanimidade, deu provimento, considerando vencido o prazo prescricional.") == "unânime"
+        assert _votacao_declarada("Decide a Turma, por maioria, negar provimento, vencido o Des. Fulano.") == "por maioria"
+        _s = _sanitizar("relator 'João da Silva' consulta «Fulano de Tal» proc 2009.34.00.012345-6 e 12345-67.2019.4.01.3400 e 1234567 url https://x.br/a;jsessionid=ABC?q=1 a@b.com")
+        for _v in ("João", "Fulano", "2009.34", "12345-67", "1234567", "jsessionid", "a@b.com"):
+            assert _v not in _s, (_v, _s)
+        assert _descrever_args({"fonte": "Fulano", "base": "trf1 João", "tipo": ["Maria Souza"], "pagina": 2, "tipo_data": "julgamento"}) == \
+            {"fonte": "<valor fora da lista>", "base": "<valor fora da lista>", "tipo": ["<valor fora da lista>"], "pagina": 2, "tipo_data": "julgamento"}
+        import time as _t0
+        _a = _t0.time(); _sanitizar('"' + "a" * 400000); _sanitizar("a." * 400000 + "@"); assert _t0.time() - _a < 2, "sanitizar lento"
+        _ae2 = globals()["_ARQUIVO_ERROS"]
+        with _tempfile.TemporaryDirectory() as _tmp:
+            globals()["_ARQUIVO_ERROS"] = os.path.join(_tmp, "e.jsonl")
+            try:
+                async def _lt_parcial(): return "[PESQUISA INCOMPLETA — parou em 2022 (HTTP 503)]\n**Linha do tempo no TRF1** (Maria Souza aposentadoria · 2021–2023 · órgão: Gab. Des. Fulano)"
+                _lt_parcial.__name__ = "linha_do_tempo_trf1"
+                asyncio.run(_diario(_lt_parcial)())
+                _txt = open(globals()["_ARQUIVO_ERROS"], encoding="utf-8").read()
+                assert "Maria" not in _txt and "Fulano" not in _txt and "HTTP 503" in _txt, _txt
+            finally:
+                globals()["_ARQUIVO_ERROS"] = _ae2
+        with _tempfile.TemporaryDirectory() as _tmp:
+            _dr2 = globals()["DIR_RECIBOS"]; globals()["DIR_RECIBOS"] = _tmp
+            try:
+                _txt = "aposentadoria especial do segurado"
+                json.dump({"id_documento": "9", "texto": _txt, "sha256": hashlib.sha256(_txt.encode()).hexdigest(), "data_julgamento": 20200101, "base": "trf1"},
+                          open(os.path.join(_tmp, "9.json"), "w", encoding="utf-8"))
+                assert "9" in _buscar_recibos("aposentadoria", None) and "BUSCA LOCAL NÃO REALIZADA" in _buscar_recibos("$", None)
+            finally:
+                globals()["DIR_RECIBOS"] = _dr2
+        assert _fatos_do_julgado("RELATÓRIO\nPUIL interposto contra acórdão que reformou a sentença. É o relatório.\nVoto\nNego provimento ao recurso por unanimidade, pois a tese não procede.\n")[1].find("Nego") < 0
+        assert _fatos_do_julgado("RELATÓRIO\nRelatório dispensado (art. 38 da Lei 9.099/95), conforme a regra do rito sumaríssimo.\nVOTO\nNego provimento.\n") == ""
 
         print("selftest offline OK")
 

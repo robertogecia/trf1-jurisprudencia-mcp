@@ -52,7 +52,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 
-VERSAO = "1.5.0"
+VERSAO = "1.5.1"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -1652,6 +1652,12 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
         linhas.append(
             "Dica: total alto — restrinja com `E` (ex.: `\"dano moral\" E negativação`), com "
             "`grupos`, com `[EMEN]` para buscar só na ementa, ou com filtro de órgão/relator/data."
+        )
+    if not docs and not total and (filtros or {}).get("origem"):
+        linhas.append(
+            "⚠️ O filtro `origem` casa o campo \"Origem\" do portal, que é o TRIBUNAL de origem (nos resultados aparece "
+            "\"TRF - PRIMEIRA REGIÃO\"), e NÃO o estado nem a seção judiciária: \"RO\" ou \"Rondônia\" nunca casam. Refaça sem `origem`; "
+            "a unidade de origem aparece nos 4 últimos dígitos do número CNJ de cada resultado (ex.: .4.01.4100). Zero aqui foi do filtro, não do assunto."
         )
     if not docs:
         linhas.append(
@@ -3348,7 +3354,7 @@ try:
             relator: Nome (ou parte) do relator — filtro do painel avançado do portal.
             orgao_julgador: Ex.: "QUINTA TURMA", "SEGUNDA SEÇÃO".
             classe: Sigla ou nome da classe (ex.: "AC", "AMS", "AG", "ApCiv").
-            origem: Seção judiciária de origem (ex.: "RO", "SEÇÃO JUDICIÁRIA DE RONDÔNIA").
+            origem: Campo "Origem" do portal = TRIBUNAL de origem (nos resultados: "TRF - PRIMEIRA REGIÃO"); NÃO é estado nem seção judiciária — "RO" retorna zero (medido 12/10/2026). Para Rondônia, busque pelo assunto e confira o final do número CNJ.
             numero: Número do processo (com ou sem pontuação) — restringe ao campo Número.
             ementa_decisao: Termos buscados SÓ na ementa/dispositivo (a consulta livre varre tudo).
             referencia_legislativa: Norma indexada manualmente pelo portal (ex.: "lei 8429") — cobertura
@@ -4271,6 +4277,9 @@ if __name__ == "__main__":
         assert _fatos_do_julgado("RELATÓRIO\nPUIL interposto contra acórdão que reformou a sentença. É o relatório.\nVoto\nNego provimento ao recurso por unanimidade, pois a tese não procede.\n")[1].find("Nego") < 0
         assert _fatos_do_julgado("RELATÓRIO\nRelatório dispensado (art. 38 da Lei 9.099/95), conforme a regra do rito sumaríssimo.\nVOTO\nNego provimento.\n") == ""
 
+        _hint = _format_busca([], 0, {"consulta_montada": "x", "pagina": 1, "por_pagina": 10, "filtros": {"origem": "RO"}, "base": "trf1"})
+        assert "TRIBUNAL de origem" in _hint and "nunca casam" in _hint
+        assert "TRIBUNAL de origem" not in _format_busca([], 0, {"consulta_montada": "x", "pagina": 1, "por_pagina": 10, "filtros": {}, "base": "trf1"})
         print("selftest offline OK")
 
         if "--online" in sys.argv:

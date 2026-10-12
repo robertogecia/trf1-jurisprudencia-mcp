@@ -39,6 +39,7 @@ import contextlib
 import hashlib
 import html as _html
 import json
+import math
 import os
 import platform
 import re
@@ -48,9 +49,10 @@ import threading
 import time
 import unicodedata
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Any
 
-VERSAO = "1.4.1"
+VERSAO = "1.5.0"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -219,6 +221,22 @@ def _limpar(texto: str, limite: int = 0) -> str:
     if limite and len(t) > limite:
         t = t[:limite].rsplit(" ", 1)[0] + "…"
     return t
+
+
+def _trecho_centrado(bruto: str, limite: int = 800) -> str:
+    """Trecho de até `limite` caracteres que MOSTRA o primeiro termo destacado («...») do portal.
+    TJRO v1.27.1 (12/10/2026): o corte simples nos primeiros caracteres escondia todos os termos em 7,1% dos resultados
+    (o fragmento destacado do portal pode ser bem maior que a janela). Sem destaque ou com o termo já na janela: igual a _limpar."""
+    t = _limpar(bruto, 0)
+    i = t.find("«")
+    if i < 0 or i + 40 <= limite:
+        return _limpar(bruto, limite)
+    ini = max(0, i - 200)
+    esp = t.find(" ", ini)
+    ini = esp + 1 if ini and 0 <= esp < i else ini
+    cauda = t[ini:]
+    corte = cauda if len(cauda) <= limite else cauda[:limite].rsplit(" ", 1)[0] + "…"
+    return "…" + corte
 
 
 def _sem_destaque(t: str) -> str:
@@ -1279,6 +1297,94 @@ def _aplicar_fecho(d: dict) -> list[str]:
     return avisos
 
 
+# --- Votação declarada e FATOS DO JULGADO (porte do TJRO v1.20–v1.26; TRF1 v1.5.0) ---- #
+_RE_VENCIDO = re.compile(r"\bVENCID[OA]S?\b")
+_RE_DIVERGENTE_PREV = re.compile(r"VOTO(?:-VISTA)? DIVERGENTE|\bDIVERG[EÊ]NCIA\b|LAVRAR[AÁ] O ACORDAO|VENCID[OA]S? (?:A|O|AS|OS) RELATOR|NOS TERMOS DO VOTO DIVERGENTE")
+
+
+def _votacao_declarada(texto: str) -> str:
+    """Votação declarada na proclamação (o campo "Decisão" do portal ou o fecho do inteiro teor): "unânime", "por maioria",
+    "por maioria, voto divergente prevaleceu", e/ou "com declaração de voto". Vazio quando não reconhece (nunca chuta).
+    Lê só a proclamação ("Decide a Turma, por unanimidade, …" / "A Turma Nacional de Uniformização decidiu, por …"), nunca o voto;
+    não diz quem foi o vencido. Na TNU o julgamento por maioria costuma trazer "RELATOR DO ACÓRDÃO" na ata (lido em _fecho_tnu)."""
+    if not texto:
+        return ""
+    p = _fold(re.sub(r"\s+", " ", _limpar(texto, 0)))[:1500].upper()
+    maioria = bool(re.search(r"\bMAIORIA\b", p)) or bool(_RE_VENCIDO.search(p))
+    if maioria:
+        v = "por maioria, voto divergente prevaleceu" if _RE_DIVERGENTE_PREV.search(p) and not re.search(r"VENCIDO[^.]{0,40}DIVERGENTE", p) else "por maioria"
+    elif re.search(r"UNANIMIDADE|\bUNANIME\b|\bUNANIMEMENTE\b", p):
+        v = "unânime"
+    else:
+        return ""
+    if re.search(r"DECLARA[CÇ][AÃ]O DE VOTO", p):
+        v += ", com declaração de voto"
+    return v
+
+
+def _votacao_do_documento(d: dict) -> str:
+    """Votação do julgado: do "Decisão" (dispositivo literal) e, na TNU, do ACÓRDÃO/ata do inteiro teor quando o dispositivo não a diz.
+    Se a ata da TNU traz "RELATOR DO ACÓRDÃO" diferente do relator do cabeçalho, o voto do relator foi vencido (maioria)."""
+    tipo = _fold(d.get("tipo") or "")
+    if "monocrat" in tipo or "presid" in tipo or tipo == "sumula" or tipo.startswith("arguicao"):
+        return ""  # decisão de um só: sem votação
+    v = _votacao_declarada(d.get("decisao") or "")
+    it = d.get("inteiro_teor_texto") or ""
+    if not v and it:
+        m = list(re.finditer(r"(?i)turma nacional de uniformiza[çc][ãa]o\s+decidiu[^.]{0,200}", it))
+        v = _votacao_declarada(m[-1].group(0)) if m else ""
+    rt, ra = d.get("relator_texto") or "", d.get("relator_acordao_texto") or ""
+    if it and v == "por maioria" and ra and rt and norm(ra) != norm(rt) and norm(ra) not in norm(rt) and norm(rt) not in norm(ra):
+        v = "por maioria, voto divergente prevaleceu"
+    return v
+
+
+_FATOS_MAX = 1200
+_RE_LIXO_WORD = re.compile(r"^\s*(?:\d+(?:\.\d+)?\s+\d+x\d+\s+)?(?:Normal\s+)?(?:\d+\s+){0,3}(?:(?:false|true)\s+){1,3}(?:[A-Z]{2}-[A-Z]{2}\s+|X-NONE\s+){1,3}(?:MicrosoftInternetExplorer\d\s+)?")
+_PARTES_FATOS = (r"(?:agravante|agravad[oa]s?|apelante|apelad[oa]s?|recorrente|recorrid[oa]s?|embargante|embargad[oa]s?|autor(?:a|es|as)?|r[ée]u|"
+                 r"requerente|requerid[oa]s?|parte|banco|impetrante|exequente|executad[oa]s?|INSS|Instituto|Uni[ãa]o|Fazenda|Caixa|requerente|suscitante)")
+_VERBOS_FATOS = r"(?:sustent|alega|aleg[oó]u|alegava|aduz|afirm|argument|narra|defende|insurg|pretende|postula|requer)\w*"
+_RE_ALEGACAO_FATOS = re.compile(
+    r"\b(?:" + _PARTES_FATOS + r"\W+(?:\w+\W+){0,2}?" + _VERBOS_FATOS + r"|" + _VERBOS_FATOS + r"\W+(?:(?:a|o|as|os|que)\W+)?" + _PARTES_FATOS +
+    r"|(?:alegava|alegando|sustentando|afirmando|argumentando|aduzindo|alega[çc][ãa]o))", re.I)
+
+
+def _fatos_do_julgado(it: str):
+    """Trecho LITERAL em que o próprio julgado resume os fatos (TNU, onde há inteiro teor): a seção "I. Caso em exame" da
+    ementa ou, sem ela, o RELATÓRIO até o VOTO. Nunca resume nem reescreve; sem seção reconhecível devolve vazio.
+    Devolve (onde, texto) ou ""."""
+    if not it:
+        return ""
+    for sec in _secoes_da_ementa(it, 0, len(it)):
+        if sec["nome"] == "caso em exame":
+            ini = sec["a"]
+            m = re.match(r"\s*(?:[IVXivx]{1,3}\s*[.)-]?\s*)?[Cc][Aa][Ss][Oo] [Ee][Mm] [Ee][Xx][Aa][Mm][Ee]\s*[.:]?\s*", it[ini:sec["b"]])
+            txt = it[ini + (m.end() if m else 0):sec["b"]].strip()
+            if len(txt) > 40:
+                return ("ementa › caso em exame", txt[:_FATOS_MAX])
+    mr = re.search(r"(?m)^[ \t]*RELAT[ÓO]RIO[ \t]*$", it[:6000])
+    if mr:
+        mv = re.compile(r"(?m)^[ \t]*VOTO\b[^\n]*$").search(it, mr.end())
+        fim = mv.start() if mv else min(len(it), mr.end() + _FATOS_MAX)
+        txt = _RE_LIXO_WORD.sub("", it[mr.end():fim].strip(" \t\n:.-")).strip()
+        if len(txt) > 40:
+            return ("relatório do acórdão", txt[:_FATOS_MAX])
+    return ""
+
+
+def _linha_fatos(d: dict) -> str:
+    f = _fatos_do_julgado(d.get("inteiro_teor_texto") or "")
+    if not f:
+        return ""
+    ft = re.sub(r"\s+", " ", f[1]) + (" […]" if len(f[1]) >= _FATOS_MAX else "")
+    aviso = ""
+    if f[0].startswith("relatório"):
+        aviso = " ⚠️ É o relatório: narra o pedido e as alegações das partes, NÃO o fundamento nem o resultado; confira os dois no voto e no fecho."
+    elif _RE_ALEGACAO_FATOS.search(f[1]):
+        aviso = " ⚠️ O trecho contém alegação da parte (sustentou/alega/afirma): é o que a parte diz, não fato reconhecido pelo julgado; não o transforme em fato na ficha."
+    return f"📌 FATOS DO JULGADO (trecho literal, {f[0]}; não é resumo meu): \"{ft}\"{aviso}"
+
+
 # --- Sinais do julgado (espelho do TJRO v1.7.6/v1.7.12): só etiqueta o que já veio ---- #
 _RE_ANCORAS = [
     (re.compile(r"s[úu]mula\s+vinculante\s+n?[º°.]*\s*(\d{1,4})", re.I), "Súmula Vinculante %s"),
@@ -1583,14 +1689,17 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
             meta_l.append(f"Fonte: {d['fonte_publicacao']}")
         linhas.append("  " + " · ".join(meta_l))
         linhas.append(f"  Citação: {_citacao_com_link(d)} — verificação: {_nivel_verificacao(d)}")
+        _vot = _votacao_do_documento(d)
+        if _vot:
+            linhas.append(f"  🗳️ Votação declarada no dispositivo: {_vot} (não diz quem foi o vencido; o voto vencido só se vê no inteiro teor)")
         for sl in _linhas_de_sinais(d):
             linhas.append(f"  {sl}")
         em = d.get("ementa") or ""
         if len(em) > TRECHO_EMENTA:
             houve_corte = True
-        linhas.append(f"  Ementa (trecho): {_limpar(em, TRECHO_EMENTA) or '—'}")
+        linhas.append(f"  Ementa (trecho): {_trecho_centrado(em, TRECHO_EMENTA) or '—'}")
         if d.get("decisao"):
-            linhas.append(f"  Dispositivo: {_limpar(d['decisao'], TRECHO_DECISAO)}")
+            linhas.append(f"  Dispositivo: {_trecho_centrado(d['decisao'], TRECHO_DECISAO)}")
         irmaos = por_numero.get(d["numero_digitos"], [])
         if len(irmaos) > 1 and irmaos[0] is d:
             desc = "; ".join(
@@ -1658,8 +1767,14 @@ def _format_decisao(docs: list[dict], numero: str, total: int) -> str:
             linhas.append("  " + " · ".join(f"{k}: {v}" for k, v in extras.items()))
         if d.get("fonte_publicacao"):
             linhas.append(f"  Fonte da publicação: {d['fonte_publicacao']}")
+        _vot = _votacao_do_documento(d)
+        if _vot:
+            linhas.append(f"  🗳️ Votação declarada: {_vot} (não diz quem foi o vencido)")
         for sl in _linhas_de_sinais(d):
             linhas.append(f"  {sl}")
+        _lf = _linha_fatos(d)
+        if _lf:
+            linhas.append(f"  {_lf}")
         if len(em) > orcamento_por_doc:
             em = em[:orcamento_por_doc].rsplit(" ", 1)[0] + "… [CORTADO pelo orçamento de caracteres — o recibo em disco tem o texto inteiro]"
         linhas.append(f"\n**Ementa (integral, literal do portal):**\n{em}")
@@ -2410,10 +2525,455 @@ def _carimbo_nao_realizada(motivo) -> str:
     if not re.search(r"disjuntor em pausa|Muitas consultas|Fila de espera|fail-closed", m):
         # ritmo local não pede relato; falha do portal/rede pede (TJRO v1.7.9, sem texto da busca)
         ajuda = (f"\nSe persistir, relate em {ISSUES_URL} (informe a versão v{VERSAO} e a hora; "
-                 "não inclua número de processo nem texto da busca — a issue é pública).")
+                 "não inclua número de processo nem texto da busca — a issue é pública). "
+                 "`diagnostico_erros_trf1` com relatorio=true gera o relatório técnico já sanitizado para colar na issue.")
     return (f"[PESQUISA NÃO REALIZADA — {m}]\n"
             "Isto NÃO é \"não localizado\": a consulta não chegou a ser feita ou não foi respondida. "
             "Registre a frente como pendente; use diagnostico_ritmo_trf1 antes de concluir que o portal está fora." + ajuda)
+
+
+
+# --------------------------------------------------------------------------- #
+# Busca nos recibos locais (0 requisição) — porte do buscar_recibos_tjro        #
+# --------------------------------------------------------------------------- #
+RECIBOS_LIMITE_MAX, RECIBOS_GRUPOS_MAX, RECIBOS_TERMOS_POR_GRUPO_MAX = 30, 6, 12
+_STOP_RECIBOS = {"a", "o", "e", "de", "da", "do", "das", "dos", "em", "no", "na", "nos", "nas", "por", "para", "com", "um", "uma", "que", "se", "ao", "aos"}
+
+
+def _regex_termo(t: str):
+    """Termo → regex sobre texto normalizado. `$`/`*` no fim = radical; frase com espaço = palavras vizinhas, em ordem."""
+    t = norm(str(t or "")).strip()
+    radical = t.endswith("$") or t.endswith("*")
+    partes = [re.escape(x) for x in re.split(r"[^a-z0-9]+", t) if x]
+    if not partes:
+        return None
+    corpo = r"[^a-z0-9]+".join(partes)
+    return re.compile(r"(?<![a-z0-9])" + corpo + ("" if radical else r"(?![a-z0-9])"))
+
+
+def _listar_recibos(pasta: str | None = None) -> list[dict]:
+    pasta = pasta or DIR_RECIBOS
+    if not os.path.isdir(pasta):
+        return []
+    out = []
+    for nome in sorted(os.listdir(pasta)):
+        if nome.endswith(".json"):
+            rec = ler_recibo(nome[:-5]) if pasta == DIR_RECIBOS else None
+            if rec is None and pasta != DIR_RECIBOS:
+                try:
+                    with open(os.path.join(pasta, nome), encoding="utf-8") as f:
+                        r = json.load(f)
+                    if isinstance(r, dict) and isinstance(r.get("texto"), str) and hashlib.sha256(r["texto"].encode("utf-8")).hexdigest() == r.get("sha256"):
+                        rec = r
+                except Exception:
+                    rec = None
+            if rec and rec.get("id_documento"):
+                rec = dict(rec)
+                rec["_tn"] = norm(rec.get("inteiro_teor") or rec["texto"])
+                out.append(rec)
+    return out
+
+
+def _trecho_em_volta(texto: str, tn: str, rx, largura: int = 160) -> str:
+    if rx is None:
+        return ""
+    m = rx.search(tn)
+    if not m:
+        return ""
+    base = rec_texto = texto
+    # norm preserva o comprimento na maior parte dos casos; se não, recua para o início
+    i = m.start() if len(tn) == len(base) else max(0, int(m.start() * len(base) / max(1, len(tn))))
+    return re.sub(r"\s+", " ", base[max(0, i - largura):i + largura]).strip()
+
+
+def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_processo: str = "", id_documento: str = "",
+                    relator: str = "", base: str = "") -> str:
+    palavras = [p for p in re.split(r"[^a-z0-9*$]+", norm(str(consulta or ""))) if p and p.rstrip("*$") not in _STOP_RECIBOS]
+    gs = []
+    if isinstance(grupos, list):
+        for g in [g for g in grupos if isinstance(g, list) and g][:RECIBOS_GRUPOS_MAX]:
+            termos = [t for t in (str(x or "").strip() for x in g) if t][:RECIBOS_TERMOS_POR_GRUPO_MAX]
+            if termos:
+                gs.append(termos)
+    dig = _so_digitos(str(nr_processo or ""))
+    id_doc = str(id_documento or "").strip()
+    if id_doc and not re.fullmatch(r"[A-Za-z0-9]{1,40}", id_doc):
+        return f"BUSCA LOCAL NÃO REALIZADA — id_documento inválido (recebi «{id_doc[:40]}»)."
+    if str(nr_processo or "").strip() and len(dig) < 7:
+        return "BUSCA LOCAL NÃO REALIZADA — nr_processo precisa de pelo menos 7 dígitos (número CNJ, com ou sem máscara, ou o início dele)."
+    rel_n = re.sub(r"[^a-z0-9]+", " ", norm(str(relator or ""))).strip()
+    b = (base or "").strip().lower()
+    if b and b not in BASES:
+        return f"BUSCA LOCAL NÃO REALIZADA — base deve ser uma de {', '.join(BASES)}."
+    if not palavras and not gs and not dig and not id_doc and not rel_n:
+        return "BUSCA LOCAL NÃO REALIZADA — informe `consulta` (palavras), `grupos` (sinônimos), `nr_processo`, `id_documento` ou `relator`."
+    try:
+        lim = int(limite)
+    except Exception:
+        lim = 0
+    lim = max(1, min(lim or 10, RECIBOS_LIMITE_MAX))
+    todos = _listar_recibos(pasta)
+    total_geral = len(todos)
+    if b:
+        todos = [r for r in todos if (r.get("base") or "trf1") == b]
+    if id_doc:
+        todos = [r for r in todos if str(r.get("id_documento")) == id_doc]
+    if dig:
+        todos = [r for r in todos if (lambda nd: bool(nd) and (nd == dig or (len(dig) < 20 and nd.startswith(dig))))(_so_digitos(str(r.get("nr_processo") or "")))]
+    if rel_n:
+        todos = [r for r in todos if rel_n in re.sub(r"[^a-z0-9]+", " ", norm(f"{r.get('relator') or ''} {r.get('relator_texto') or ''}"))]
+    res_p = [r for r in (_regex_termo(p) for p in palavras) if r]
+    res_g = [g for g in ([r for r in (_regex_termo(t) for t in grp) if r] for grp in gs) if g]
+    achados = []
+    for r in todos:
+        tn = r["_tn"]
+        if not all(p.search(tn) for p in res_p):
+            continue
+        if not all(any(p.search(tn) for p in g) for g in res_g):
+            continue
+        soma = sum(len(p.findall(tn)) for p in res_p) + sum(len(p.findall(tn)) for g in res_g for p in g)
+        peso = soma / math.log(len(tn) + 10)
+        achados.append((peso, _data_iso(r.get("data_julgamento") or ""), r))
+    achados.sort(key=lambda x: x[1], reverse=True)
+    achados.sort(key=lambda x: -x[0])
+    filtro_txt = ", ".join(x for x in [
+        (f"processo {_cnj(dig) if len(dig) == 20 else dig + '…'}" if dig else ""), (f"id {id_doc}" if id_doc else ""),
+        (f"relator «{str(relator).strip()}»" if rel_n else ""), (f"base {b}" if b else "")] if x)
+    termos_mostrados = ", ".join(palavras + [t for g in gs for t in g]) or "(sem termos)"
+    linhas = [
+        f"**Recibos locais do TRF1/TNU — {len(achados)} de {total_geral} documento(s) já lidos nesta máquina atendem a «{termos_mostrados}»"
+        f"{(' em ' + filtro_txt) if filtro_txt else ''} · ZERO requisição ao portal**",
+        "⚠️ Isto NÃO é pesquisa no acervo do CJF: só olha o que obter_decisao_trf1 já trouxe para esta máquina. Zero aqui NUNCA é "
+        "\"não localizado\" — para isso, buscar_jurisprudencia_trf1. Recibo da base trf1 guarda ementa e dispositivo (sem voto); o inteiro teor só existe nos da TNU.",
+        "",
+    ]
+    if not todos:
+        linhas.append(f"_(nenhum recibo em {pasta or DIR_RECIBOS})_")
+    for i, (_, _, r) in enumerate(achados[:lim]):
+        doc = _doc_de_recibo(r)
+        vot = _votacao_do_documento(doc)
+        linhas.append(
+            f"{i + 1}. {r.get('tipo') or '?'}{(' ' + r['classe']) if r.get('classe') else ''} · {r.get('orgao') or 'órgão não registrado'} ({r.get('orgao_fonte') or '?'}) "
+            f"· julgado em {r.get('data_julgamento') or '?'} · Rel. {r.get('relator_texto') or r.get('relator') or '—'} · {r.get('numero') or _cnj(r.get('nr_processo') or '')} "
+            f"· id {r['id_documento']} · base {r.get('base') or 'trf1'}" + (f" · 🗳️ {vot}" if vot else ""))
+        pat = res_p[0] if res_p else (res_g[0][0] if res_g else None)
+        tre = _trecho_em_volta(r.get("inteiro_teor") or r["texto"], r["_tn"], pat)
+        if tre:
+            linhas.append(f"   «…{tre}…»")
+        cust = ("inteiro teor da TNU incluído" if r.get("inteiro_teor_incluido") else "só ementa/dispositivo (sem voto)")
+        linhas.append(f"   recibo lido do portal em {str(r.get('obtido_em') or '?')[:16].replace('T', ' ')} · {cust}")
+    if len(achados) > lim:
+        linhas.append(f"\n_(mais {len(achados) - lim} recibo(s) atendem; aumente `limite` até {RECIBOS_LIMITE_MAX} ou refine os termos)_")
+    linhas.append("\nPara conferir uma frase antes das aspas: verificar_citacao_trf1(numero, trecho) — usa o recibo, 0 requisições. "
+                  "Para a ementa e o dispositivo integrais: obter_decisao_trf1(numero).")
+    return "\n".join(linhas)
+
+
+# --------------------------------------------------------------------------- #
+# Diário local de erros e diagnóstico — porte do TJRO v1.26 (10/10/2026)        #
+# Só dado técnico: NUNCA texto de busca, grupos, nome de relator/parte nem número de processo. #
+# O registro jamais quebra uma ferramenta.                                       #
+# --------------------------------------------------------------------------- #
+_ARQUIVO_ERROS = os.environ.get("TRF1_MCP_ARQUIVO_ERROS") or os.path.join(os.path.expanduser("~"), ".trf1-jurisprudencia-erros.jsonl")
+_MAX_LINHAS_ERROS, _MAX_BYTES_ERROS = 500, 400_000
+_VALORES_SEGUROS = {"tipo", "tipo_acordao", "fonte", "base", "tipo_data", "pagina", "por_pagina", "limite", "dias"}
+_VERSAO_SERVIDOR = f"python-{VERSAO}"
+_RE_MARC_PARCIAL = re.compile(r"\[PESQUISA (?:NÃO REALIZADA|INCOMPLETA)\b")
+
+
+def _tipo_do_erro(m: str) -> str:
+    m = str(m or "")
+    if re.search(r"disjuntor em pausa|Muitas consultas|Fila de espera|fail-closed|evitando novas tentativas", m, re.I): return "limite_de_ritmo"
+    if re.search(r"desafio|verifica[çc][ãa]o de navegador|cloudflare|just a moment", m, re.I): return "desafio_navegador"
+    if re.search(r"recusa sistem[áa]tica|bloque|robotiza|automa[çc][ãa]o|HTTP 40[39]|HTTP 429", m, re.I): return "bloqueio_do_portal"
+    if re.search(r"Muitos Usu[áa]rios", m, re.I): return "portal_congestionado"
+    if re.search(r"tempo esgotado|timed? ?out", m, re.I): return "timeout"
+    mm = re.search(r"\bHTTP (\d{3})\b|Server error '(\d{3})", m)
+    if mm: return "http_" + (mm.group(1) or mm.group(2))
+    if re.search(r"ConnectError|ReadError|certificate|CERT_|getaddrinfo|Name or service|Connection (?:refused|reset)", m, re.I): return "rede_ou_certificado"
+    if re.search(r"sess[ãa]o|ViewState|resposta inesperada|n[ãa]o reconhec", m, re.I): return "resposta_inesperada"
+    return "outro"
+
+
+def _sanitizar(texto, maximo: int = 300) -> str:
+    t = str(texto if texto is not None else "")
+    t = re.sub(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", "<nº-processo>", t)
+    t = re.sub(r"\b\d{20}\b", "<nº-processo>", t)
+    t = re.sub(r"\b\d{8,}\b", "<nº>", t)
+    t = re.sub(r"[\w.+-]+@[\w-]+\.[\w.-]+", "<email>", t)
+    t = re.sub(r"https?://[^\s)\"']+", lambda u: re.sub(r"[?#].*$", "", u.group(0)), t)
+    t = re.sub(r"[\"“”][^\"“”]{4,}[\"“”]", "«…»", t)
+    return re.sub(r"\s+", " ", t).strip()[:maximo]
+
+
+def _descrever_args(args: dict | None) -> dict:
+    out: dict = {}
+    for k, v in (args or {}).items():
+        if v is None or v == "" or v == []:
+            continue
+        if k in _VALORES_SEGUROS and isinstance(v, (int, str, list)):
+            out[k] = [_sanitizar(x, 40) for x in v] if isinstance(v, list) else (_sanitizar(v, 60) if isinstance(v, str) else v)
+        elif isinstance(v, list):
+            out[k] = (f"{len(v)} grupo(s), {sum(len(g) for g in v)} termo(s)" if v and isinstance(v[0], list) else f"{len(v)} item(ns)")
+        elif isinstance(v, str):
+            out[k] = f"<texto: {len(v)} car.>"
+        else:
+            out[k] = type(v).__name__
+    return out
+
+
+def _registrar_erro(ferramenta: str, erro=None, texto: str = "", args: dict | None = None, ms: int | None = None, parcial: bool = False) -> dict | None:
+    try:
+        msg = str(erro) if erro is not None else str(texto or "")
+        mh = re.search(r"\bHTTP (\d{3})\b|Server error '(\d{3})", msg)
+        try:
+            e = _ler_estado()
+            agora = time.time()
+            lim = {"nivel": e["indice_janela"] + 1, "de": len(_ESCADA_JANELA_S),
+                   "ultimoMinuto": len([t for t in (e.get("requisicoes") or []) if agora - t <= 60.0]), "bloqueios": len(e.get("incidentes") or [])}
+        except Exception:
+            lim = None
+        entrada = {"quando": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "versao": _VERSAO_SERVIDOR,
+                   "sistema": f"{sys.platform} python {sys.version.split()[0]}", "ferramenta": ferramenta, "tipo": _tipo_do_erro(msg),
+                   "http": (mh.group(1) or mh.group(2)) if mh else None, "parcial": parcial, "ms": ms,
+                   "args": _descrever_args(args), "limitador": lim, "mensagem": _sanitizar(msg)}
+        fd = os.open(_ARQUIVO_ERROS, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entrada, ensure_ascii=False) + "\n")
+        with contextlib.suppress(Exception):
+            if os.path.getsize(_ARQUIVO_ERROS) > _MAX_BYTES_ERROS:
+                with open(_ARQUIVO_ERROS, encoding="utf-8") as f:
+                    ls = [x for x in f.read().split("\n") if x]
+                with open(_ARQUIVO_ERROS, "w", encoding="utf-8") as f:
+                    f.write("\n".join(ls[-_MAX_LINHAS_ERROS:]) + "\n")
+        return entrada
+    except Exception:
+        return None
+
+
+def _diario(f):
+    """Decorador das ferramentas: anota exceção e resposta de falha ([PESQUISA NÃO REALIZADA/INCOMPLETA]); nunca quebra a ferramenta.
+    Falha de ritmo LOCAL (disjuntor, fila) não é anotada: é o limitador funcionando, não erro."""
+    import functools
+
+    @functools.wraps(f)
+    async def w(*a, **k):
+        t0 = time.time()
+        try:
+            r = await f(*a, **k)
+        except Exception as e:
+            _registrar_erro(f.__name__, erro=e, args=k, ms=int((time.time() - t0) * 1000))
+            raise
+        try:
+            if f.__name__ != "diagnostico_erros_trf1" and isinstance(r, str) and _RE_MARC_PARCIAL.search(r) and _tipo_do_erro(r) != "limite_de_ritmo":
+                _registrar_erro(f.__name__, texto=r, args=k, ms=int((time.time() - t0) * 1000), parcial="INCOMPLETA" in r[:40])
+        except Exception:
+            pass
+        return r
+    return w
+
+
+_CAUSAS_ERRO = {
+    "limite_de_ritmo": ("Muitas consultas na janela do limitador local.", "Espere o tempo indicado; use `buscar_recibos_trf1` para o que já foi lido.", "usuario"),
+    "bloqueio_do_portal": ("O portal do CJF recusou ou bloqueou a consulta.", "Espere a pausa terminar e faça UMA busca; o site jurisprudencia.cjf.jus.br segue como alternativa. Se repetir com pouco tráfego, a causa é externa.", "portal"),
+    "desafio_navegador": ("O portal pediu verificação de navegador (Cloudflare/WAF).", "Use o site pelo navegador; esta extensão não contorna.", "portal"),
+    "portal_congestionado": ("O portal respondeu \"Muitos Usuários\" (congestionamento do CJF).", "Tente de novo em alguns minutos; não é erro da extensão.", "portal"),
+    "timeout": ("O portal demorou mais que o limite.", "Repita com por_pagina menor ou mais tarde.", "portal"),
+    "rede_ou_certificado": ("Falha de rede, DNS ou certificado.", "Confira a conexão/VPN/proxy. Se só esta extensão falha, relate.", "usuario"),
+    "resposta_inesperada": ("O portal respondeu num formato que a extensão não reconhece.", "Pode ser mudança no portal: envie o relatório ao autor.", "autor"),
+    "outro": ("Erro não classificado.", "É o mais útil para o autor: envie o relatório.", "autor"),
+}
+
+
+def _causa_erro(tipo: str):
+    if tipo in _CAUSAS_ERRO:
+        return _CAUSAS_ERRO[tipo]
+    if tipo.startswith("http_5"):
+        return ("O portal respondeu erro de servidor.", "Repita depois; se só acontece com certos filtros, pode ser consulta mal formada (relate).", "portal")
+    if tipo.startswith("http_4"):
+        return ("O portal recusou a requisição (4xx).", "Provável filtro com grafia errada ou consulta mal formada: relate.", "autor")
+    return _CAUSAS_ERRO["outro"]
+
+
+def _ler_erros(dias: int = 30) -> list[dict]:
+    try:
+        corte = datetime.now(timezone.utc).timestamp() - dias * 86400
+        out = []
+        with open(_ARQUIVO_ERROS, encoding="utf-8") as f:
+            for l in f:
+                try:
+                    e = json.loads(l)
+                    if datetime.fromisoformat(e["quando"].replace("Z", "+00:00")).timestamp() >= corte:
+                        out.append(e)
+                except Exception:
+                    continue
+        return out
+    except Exception:
+        return []
+
+
+def _fmt_data_local(iso: str) -> str:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%d/%m/%Y %H:%M")
+
+
+def _resumir_erros(ent: list[dict], limite: int = 15) -> str:
+    if not ent:
+        return "Nenhum erro registrado no período. O diário só anota falhas das ferramentas (nunca o que foi pesquisado)."
+    grupos: dict = {}
+    for e in ent:
+        g = grupos.setdefault((e["tipo"], e["ferramenta"]), {"tipo": e["tipo"], "ferramenta": e["ferramenta"], "n": 0, "parciais": 0,
+                                                              "primeiro": e["quando"], "ultimo": e["quando"], "versoes": set(), "amostra": e})
+        g["n"] += 1
+        g["parciais"] += 1 if e.get("parcial") else 0
+        g["versoes"].add(str(e.get("versao")))
+        g["primeiro"] = min(g["primeiro"], e["quando"])
+        if e["quando"] >= g["ultimo"]:
+            g["ultimo"], g["amostra"] = e["quando"], e
+    lista = sorted(grupos.values(), key=lambda g: -g["n"])
+    out = [f"**Diário de erros** — {len(ent)} registro(s) em {len(lista)} padrão(ões), de {_fmt_data_local(ent[0]['quando'])} a {_fmt_data_local(ent[-1]['quando'])}. Arquivo: {_ARQUIVO_ERROS}", ""]
+    for g in lista[:max(1, limite)]:
+        causa, acao, quem = _causa_erro(g["tipo"])
+        a = g["amostra"]
+        out.append(f"- **{g['tipo']}** em `{g['ferramenta']}` · {g['n']}× ({g['parciais']} parcial/incompleto) · de {_fmt_data_local(g['primeiro'])} a {_fmt_data_local(g['ultimo'])} · {', '.join(sorted(g['versoes']))}\n"
+                   f"  Causa provável: {causa} Ação: {acao} _(quem corrige: {quem})_\n  Última mensagem: {a['mensagem']}{' (HTTP ' + a['http'] + ')' if a.get('http') else ''}")
+    autor = sum(g["n"] for g in lista if _causa_erro(g["tipo"])[2] == "autor")
+    out += ["", (f"⚠️ {autor} registro(s) são de causa que o AUTOR pode corrigir: rode `diagnostico_erros_trf1` com relatorio=true e abra uma issue com o relatório."
+                 if autor else "Nenhum registro de causa corrigível pelo autor neste período (os demais vêm do portal, da rede ou do ritmo).")]
+    return "\n".join(out)
+
+
+def _relatorio_erros(ent: list[dict], limite: int = 20) -> str:
+    ult = ent[-limite:]
+    linhas = []
+    for e in ult:
+        lim = e.get("limitador")
+        lim_t = f"{lim['nivel']}/{lim['de']}, {lim['ultimoMinuto']}/min" if isinstance(lim, dict) else ""
+        linhas.append(f"| {e['quando'][:16].replace('T', ' ')} | {e['ferramenta']} | {e['tipo']}{' (' + e['http'] + ')' if e.get('http') else ''}"
+                      f"{' parcial' if e.get('parcial') else ''} | {e.get('ms') or ''} | {lim_t} | {e['mensagem']} | {json.dumps(e.get('args') or {}, ensure_ascii=False)} |")
+    return "\n".join(["**Relatório técnico para análise** (sem texto de busca, sem nomes e sem número de processo; pode ser colado em issue pública)", "",
+                      f"- Versão: {_VERSAO_SERVIDOR} · Sistema: {sys.platform} python {sys.version.split()[0]}", f"- Registros: {len(ent)} (últimos {len(ult)} abaixo)", "",
+                      "| Quando | Ferramenta | Tipo | ms | Limitador | Mensagem | Parâmetros |", "|---|---|---|---|---|---|---|", *linhas, "",
+                      f"Abrir issue: {ISSUES_URL}/new"])
+
+
+
+# --------------------------------------------------------------------------- #
+# JULGADOS QUE CITAM este e LINHA DO TEMPO por tese — porte do TJRO v1.25        #
+# (09/10/2026). Leitura assistida: NÃO detecta superação.                        #
+# --------------------------------------------------------------------------- #
+_RE_SINAL_AFASTA = re.compile(r"(?<![a-z0-9])(?:distingue|distinguish\w*|distincao|nao se aplica|inaplicavel|nao se amolda|nao guarda similitude|nao ha similitude|situacao diversa|hipotese diversa|caso diverso|em sentido contrario|em sentido diverso|contrariamente|diverge|divergente|afasta(?:-se)? a aplicacao|nao ha identidade|nao incide|nao se verifica a mesma)(?![a-z0-9])", re.ASCII)
+ANOS_TIMELINE_MAX = 6
+
+
+def _sinal_afastamento(janela: str) -> bool:
+    """Sinal lexical FRACO de que quem cita distingue ou não aplica o citado (no TJRO: 62% de precisão, 50% de cobertura em 486 janelas
+    medidas às cegas — NÃO medido no TRF1/TNU, onde o texto indexado é só ementa e dispositivo)."""
+    return bool(_RE_SINAL_AFASTA.search(norm(janela)))
+
+
+def _janelas_destacadas(d: dict, antes: int = 300, depois: int = 220, maximo: int = 2) -> list[str]:
+    """Trechos em volta do termo destacado («…») na ementa e no dispositivo do documento que CITA."""
+    out = []
+    for campo in ("ementa", "decisao"):
+        t = _limpar(d.get(campo) or "", 0)
+        pos = 0
+        while len(out) < maximo:
+            i = t.find("«", pos)
+            if i < 0:
+                break
+            j = t.find("»", i)
+            fim_destaque = (j if j >= 0 else i) + 1
+            out.append(re.sub(r"\s+", " ", t[max(0, i - antes):fim_destaque + depois]).strip())
+            pos = fim_destaque + depois
+    return out
+
+
+async def _julgados_que_citam(numero: str, base: str = "trf1", limite: int = 10) -> str:
+    try:
+        base = _validar_base(base)
+        dig = _so_digitos(numero)
+        if len(dig) < 15:
+            raise ValueError("informe o número do processo citado com pelo menos 15 dígitos (CNJ de 20 dígitos, com ou sem máscara; ou o número antigo do Pedilef)")
+        limite = max(1, min(int(limite or 10), 30))
+        formas = [_cnj(dig), dig] if len(dig) == 20 else [dig]   # o texto cita ora com máscara, ora sem
+        tipos = _validar_tipos(["ACORDAO", "DECISAOMONO"] if base != "colegiado" else None, base)
+        fontes = _validar_fontes(None) if BASES[base]["fonte"] else []
+        dados = await _consultar_portal(_montar_consulta("", [formas]), tipos, fontes, 1, 50, {}, "julgamento", "citantes", base, [])
+    except ValueError as e:
+        return _erro_de_parametro(e)
+    except PesquisaNaoRealizada as e:
+        return _carimbo_nao_realizada(e)
+    except Exception as e:
+        return _carimbo_nao_realizada(f"erro inesperado ({type(e).__name__}: {e})")
+    docs, total = dados["docs"], dados["total"]
+    rotulo = BASES[base]["rotulo"]
+    outros = [d for d in docs if d.get("numero_digitos") != dig]
+    proprios = len(docs) - len(outros)
+    achados = [(d, _janelas_destacadas(d)) for d in outros]
+    com_janela = [x for x in achados if x[1]]
+    out = [f"**Julgados do {rotulo} que citam {_cnj(dig) if len(dig) == 20 else dig}** — {len(com_janela)} com o número na ementa ou no dispositivo, "
+           f"entre os {len(docs)} documento(s) lidos dos {total} que o portal casou com o número"
+           + (f" ({proprios} são do próprio processo e foram descartados)." if proprios else ".")]
+    for i, (d, jan) in enumerate(com_janela[:limite], 1):
+        sinal = " · ⚠️ sinal lexical de afastamento (fraco)" if any(_sinal_afastamento(j) for j in jan) else ""
+        out.append(f"\n{i}. {d.get('numero') or '(sem número)'} · {d.get('orgao') or '?'} · {d.get('data_julgamento') or '—'} · Rel. {d.get('relator') or '—'} · id {d['id']}{sinal}\n> {jan[0][:520]}")
+    sem_janela = len(achados) - len(com_janela)
+    if sem_janela:
+        out.append(f"\n_{sem_janela} documento(s) casaram o número só fora da ementa e do dispositivo (por exemplo no campo de número ou no inteiro teor): abra com obter_decisao_trf1 para ver o contexto._")
+    if not com_janela and not sem_janela:
+        out.append("Nenhum outro julgado do portal traz esse número. Zero aqui não prova que ninguém o aplicou: o portal indexa ementa e dispositivo, e o número pode estar escrito de outro jeito.")
+    if total > len(docs):
+        out.append(f"_O portal casou {total} documentos; esta ferramenta lê só os 50 primeiros._")
+    out.append("\n_Só leitura assistida, sem medição própria no TRF1/TNU (no TJRO, em 486 citações medidas às cegas: 51% seguem o citado, 44% só mencionam, 3% o afastam e nenhuma o declarou superado). "
+               "Superação NÃO é detectada aqui: leia as janelas. Superação vinculante (súmula, repetitivo, IRDR) se confere no BNP/fonte oficial._")
+    return "\n".join(out)
+
+
+def _formatar_linha_do_tempo(linhas: list[dict], filtros: str, incompleta: str = "") -> str:
+    cab = "[PESQUISA INCOMPLETA — " + incompleta + "]\n" if incompleta else ""
+    out = [cab + f"**Linha do tempo no TRF1** ({filtros}) — contagem por documento do portal; resultado declarado lido do dispositivo, 1× por julgamento, "
+           "em AMOSTRA (os 50 primeiros de cada ano). Mudança de proporção é sinal para ler, nunca prova de superação.", "",
+           "| Ano | Documentos | Julgamentos na amostra | Resultado declarado |", "|---|---|---|---|"]
+    for l in linhas:
+        res = ", ".join(f"{n} {rot}" for rot, n in l["res"]) or "—"
+        out.append(f"| {l['ano']} | {l['total']} | {l['julgamentos']} | {res} |")
+    return "\n".join(out)
+
+
+async def _linha_do_tempo(consulta: str, grupos, orgao_julgador, ano_inicio, ano_fim) -> str:
+    try:
+        consulta_m = _montar_consulta(consulta, grupos)
+        if not consulta_m:
+            raise ValueError("informe `consulta` ou `grupos`: a linha do tempo precisa de uma tese")
+        hoje = datetime.now().year
+        af = int(ano_fim or hoje)
+        ai = int(ano_inicio or (af - 4))
+        if ai > af or ai < 1989 or af > hoje + 1:
+            raise ValueError(f"anos inválidos ({ai}–{af})")
+        if af - ai + 1 > ANOS_TIMELINE_MAX:
+            raise ValueError(f"no máximo {ANOS_TIMELINE_MAX} anos por chamada (cada ano gasta 3 a 4 requisições ao portal); recebi {af - ai + 1}")
+        tipos = _validar_tipos(["ACORDAO"], "trf1")
+        fontes = _validar_fontes(None)
+    except ValueError as e:
+        return _erro_de_parametro(e)
+    filtros = f"{consulta_m} · {ai}–{af}" + (f" · órgão: {orgao_julgador}" if orgao_julgador else "")
+    linhas: list[dict] = []
+    for ano in range(ai, af + 1):
+        av = {"data_inicio": f"01/01/{ano}", "data_fim": f"31/12/{ano}"}
+        if orgao_julgador and str(orgao_julgador).strip():
+            av["orgao_julgador"] = str(orgao_julgador).strip()
+        try:
+            dados = await _consultar_portal(consulta_m, tipos, fontes, 1, 50, av, "julgamento", "linha_do_tempo", "trf1", [])
+        except PesquisaNaoRealizada as e:
+            if not linhas:
+                return _carimbo_nao_realizada(e)
+            return _formatar_linha_do_tempo(linhas, filtros, f"parou em {ano} ({str(e).strip().rstrip('.')[:160]}); anos feitos: {linhas[0]['ano']}–{linhas[-1]['ano']}")
+        except Exception as e:
+            return _carimbo_nao_realizada(f"erro inesperado em {ano} ({type(e).__name__}: {e})")
+        r = _resumo_resultados_pagina(dados["docs"])
+        res = [(_ROTULOS_RESULTADO[k], r["contagem"][k]) for k in _ROTULOS_RESULTADO if r["contagem"].get(k)]
+        linhas.append({"ano": ano, "total": dados["total"], "julgamentos": r["total_julgamentos"], "res": res})
+    return _formatar_linha_do_tempo(linhas, filtros)
 
 
 def _erro_de_parametro(e) -> str:
@@ -2708,6 +3268,7 @@ try:
     mcp = FastMCP("Jurisprudência TRF1")
 
     @mcp.tool()
+    @_diario
     async def buscar_jurisprudencia_trf1(
         consulta: str = "",
         tipo: list[str] | None = None,
@@ -2813,6 +3374,7 @@ try:
                                         base, tipo_acordao))
 
     @mcp.tool()
+    @_diario
     async def obter_decisao_trf1(numero: str, base: str = "trf1") -> str:
         """Traz TODOS os documentos publicados no portal do CJF sob um número de processo do TRF1/JEF1,
         com ementa e dispositivo INTEGRAIS e literais — é o que substitui o "inteiro teor" aqui.
@@ -2846,6 +3408,7 @@ try:
         return com_avisos(await _obter_decisao(numero, base))
 
     @mcp.tool()
+    @_diario
     async def verificar_citacao_trf1(numero: str, trecho: str, base: str = "trf1") -> str:
         """Confere se um trecho aparece LITERALMENTE na ementa/dispositivo (e, na TNU, no inteiro teor)
         do julgado, antes de ir entre aspas para a peça — e diz DE QUEM é a frase.
@@ -2874,6 +3437,86 @@ try:
             Falha sai como [PESQUISA NÃO REALIZADA — motivo], nunca como ❌.
         """
         return com_avisos(await _verificar_citacao(numero, trecho, base))
+
+    @mcp.tool()
+    @_diario
+    async def julgados_que_citam_trf1(numero: str, base: str = "trf1", limite: int = 10) -> str:
+        """Julgados do portal do CJF que CITAM um julgado pelo número do processo (a ementa ou o dispositivo trazem o número).
+
+        Serve para ver como o precedente foi tratado depois (aplicado, só mencionado, distinguido) e achar o que o cita. Busca o número
+        no portal (1 consulta, 2 a 4 requisições), descarta os documentos do próprio processo e mostra o trecho em volta do número com um
+        sinal lexical FRACO de afastamento. É leitura assistida: NÃO detecta superação, e o portal só indexa ementa e dispositivo — quem cita
+        no voto sem repetir na ementa não aparece. Zero resultado não prova que ninguém aplicou o julgado.
+
+        Args:
+            numero: Número do processo citado (CNJ com ou sem máscara; mínimo de 15 dígitos).
+            base: "trf1" (padrão), "tnu" ou "colegiado".
+            limite: Máximo de julgados mostrados (padrão 10, teto 30).
+        """
+        return com_avisos(await _julgados_que_citam(numero, base, limite))
+
+    @mcp.tool()
+    @_diario
+    async def linha_do_tempo_trf1(consulta: str = "", grupos: list[list[str]] | None = None, orgao_julgador: str | None = None,
+                                  ano_inicio: int | None = None, ano_fim: int | None = None) -> str:
+        """O resultado declarado (provido, desprovido, acolhido, rejeitado…) dos acórdãos do TRF1/JEF1 sobre uma tese, ano a ano.
+
+        Uma consulta por ano (3 a 4 requisições cada; no máximo 6 anos por chamada, padrão os últimos 5), com a contagem real de documentos do
+        ano e o resultado lido do dispositivo, 1× por julgamento, nos 50 primeiros de cada ano (AMOSTRA). Mudança de proporção é sinal para ler os
+        acórdãos do ano, nunca prova de superação. Só na base trf1 (o painel de datas não existe na TNU). Se o portal parar no meio, devolve os anos
+        já feitos marcados como [PESQUISA INCOMPLETA].
+
+        Args:
+            consulta: Termos na sintaxe do motor (ver buscar_jurisprudencia_trf1).
+            grupos: Grupos de sinônimos (cada grupo é OU; os grupos se somam em E). Use o FATO julgado, não a conclusão esperada.
+            orgao_julgador: Ex.: "QUINTA TURMA" — para ver como UM órgão decide ao longo dos anos.
+            ano_inicio: Primeiro ano (padrão: ano_fim − 4).
+            ano_fim: Último ano (padrão: ano corrente).
+        """
+        return com_avisos(await _linha_do_tempo(consulta, grupos, orgao_julgador, ano_inicio, ano_fim))
+
+    @mcp.tool()
+    async def buscar_recibos_trf1(consulta: str = "", grupos: list[list[str]] | None = None, limite: int = 10,
+                                  nr_processo: str = "", id_documento: str = "", relator: str = "", base: str = "") -> str:
+        """Busca, SEM REDE, nos recibos que obter_decisao_trf1 já gravou nesta máquina (~/.trf1-jurisprudencia-recibos).
+
+        Serve para reencontrar o que já foi lido (ementa, dispositivo e, na TNU, o inteiro teor) sem gastar requisição
+        nem cota do portal: por palavras (`consulta`, todas devem aparecer), por sinônimos (`grupos`: cada grupo é OU,
+        os grupos se somam em E; `$` no fim = radical), por processo (`nr_processo`, número ou início dele), por `id_documento`,
+        por `relator` ou por `base` ("trf1", "tnu", "colegiado"). Ordena por relevância.
+
+        NÃO é pesquisa no acervo do CJF: zero resultado aqui NUNCA é "não localizado" — para isso, buscar_jurisprudencia_trf1.
+        Recibo editado à mão (sha256 não confere) é posto de lado e não aparece.
+
+        Returns:
+            Por recibo: tipo, órgão (e de onde veio), data, relator, número, id, votação declarada, trecho em volta do termo e
+            a data em que o portal entregou o texto. Falha de parâmetro sai como "BUSCA LOCAL NÃO REALIZADA".
+        """
+        try:
+            return com_avisos(_buscar_recibos(consulta, grupos, limite, None, nr_processo, id_documento, relator, base))
+        except Exception as e:
+            return com_avisos(f"BUSCA LOCAL NÃO REALIZADA — {type(e).__name__}: {e}")
+
+    @mcp.tool()
+    async def diagnostico_erros_trf1(dias: int = 30, limite: int = 15, relatorio: bool = False) -> str:
+        """Resume o diário local de erros desta extensão (~/.trf1-jurisprudencia-erros.jsonl), sem consultar o portal.
+
+        Toda falha de ferramenta (exceção, [PESQUISA NÃO REALIZADA/INCOMPLETA], bloqueio, timeout, rede) é anotada só com dado técnico:
+        data, versão, ferramenta, tipo, HTTP, duração, estado do limitador e os PARÂMETROS descritos sem conteúdo (presença/tamanho) —
+        nunca texto de busca, nome ou número de processo. Esta ferramenta agrupa por tipo, dá a causa provável, o que fazer e QUEM corrige.
+        Com `relatorio=true` devolve o relatório técnico sanitizado, pronto para colar numa issue pública.
+
+        Args:
+            dias: Janela do resumo (padrão 30).
+            limite: Máximo de padrões listados / linhas do relatório (padrão 15).
+            relatorio: true para o relatório técnico de issue.
+        """
+        try:
+            ent = _ler_erros(max(1, min(int(dias or 30), 365)))
+            texto = _relatorio_erros(ent, max(1, min(int(limite or 15), 50))) if relatorio and ent else _resumir_erros(ent, int(limite or 15))
+            return com_avisos(texto)
+        except Exception as e:
+            return com_avisos(_carimbo_nao_realizada(f"diagnóstico de erros falhou ({type(e).__name__}: {e})"))
 
     @mcp.tool()
     async def diagnostico_ritmo_trf1() -> str:
@@ -3482,6 +4125,96 @@ if __name__ == "__main__":
         # cache
         _cache_gravar("k", {"a": 1})
         assert _cache_ler("k") == {"a": 1} and _cache_ler("zzz") is None
+
+
+        # --- v1.5.0: votação declarada, FATOS DO JULGADO, trecho centrado, recibos locais, diário de erros ---
+        assert _votacao_declarada("Decide a Quinta Turma, por unanimidade, negar provimento às Apelações, nos termos do voto do Relator.") == "unânime"
+        assert _votacao_declarada("Decide a Turma, por maioria, dar provimento, nos termos do voto divergente, vencido o relator.") == "por maioria, voto divergente prevaleceu"
+        assert _votacao_declarada("Decide a Turma, por maioria, negar provimento, vencido o Juiz X, que dava provimento.") == "por maioria"
+        assert _votacao_declarada("Por unanimidade, com declaração de voto do Juiz Y, negar provimento.") == "unânime, com declaração de voto"
+        assert _votacao_declarada("Nega provimento.") == "" and _votacao_declarada("") == ""
+        assert _votacao_do_documento({"tipo": "Decisão Monocrática", "decisao": "por unanimidade"}) == ""   # decisão de um só não tem votação
+        _tnu_it = _texto_documento(open(os.path.join(fx, "12_tnu_inteiro_teor.html"), encoding="latin-1").read())
+        _dtnu = {"inteiro_teor_texto": _tnu_it, "decisao": "", "tipo": "Acórdão"}
+        assert _votacao_do_documento(_dtnu) == "unânime"   # lida do ACÓRDÃO do inteiro teor quando o dispositivo não diz
+        _lf = _linha_fatos(_dtnu)
+        assert "FATOS DO JULGADO" in _lf and "ementa › caso em exame" in _lf and "PUIL contra acórdão" in _lf, _lf
+        _lf2 = _linha_fatos({"inteiro_teor_texto": _tnu_it.replace("I. Caso em exame", "XX")})
+        assert "relatório do acórdão" in _lf2 and "NÃO o fundamento nem o resultado" in _lf2, _lf2
+        assert _linha_fatos({"inteiro_teor_texto": ""}) == ""
+        assert _RE_ALEGACAO_FATOS.search("o apelado sustenta que o prazo") and _RE_ALEGACAO_FATOS.search("sustenta a autora que") \
+            and _RE_ALEGACAO_FATOS.search("o INSS alega, em suma") and not _RE_ALEGACAO_FATOS.search("o tribunal fixou a tese")
+        assert "→" not in _fatos_do_julgado("") and _fatos_do_julgado("") == ""
+        # trecho centrado: o termo destacado depois da janela volta para dentro dela
+        _longo = "palavra " * 200 + "«alvo» fim do texto"
+        _tc = _trecho_centrado(_longo, 300)
+        assert "«alvo»" in _tc and _tc.startswith("…") and len(_tc) <= 310, _tc[:80]
+        assert _trecho_centrado("pouco «alvo» texto", 300) == "pouco «alvo» texto"
+        assert _trecho_centrado("sem destaque " * 100, 300) == _limpar("sem destaque " * 100, 300)
+        # recibos locais (pasta temporária; 0 requisição)
+        with _tempfile.TemporaryDirectory() as _tmp:
+            _dr_antes = globals()["DIR_RECIBOS"]
+            globals()["DIR_RECIBOS"] = _tmp
+            try:
+                _d1 = {"id": "TNU00033758", "base": "tnu", "numero": "0011441-43.2015.4.03.6301", "numero_digitos": "00114414320154036301",
+                       "tipo": "Acórdão", "relator": "FABIO DE SOUZA SILVA", "orgao": "TURMA NACIONAL DE UNIFORMIZAÇÃO", "data_julgamento": "14/05/2025",
+                       "ementa": "PUIL. incapacidade preexistente ao reingresso.", "decisao": "A TNU decidiu, por unanimidade, negar provimento.", "inteiro_teor_texto": _tnu_it}
+                _d2 = {"id": "1174043", "base": "trf1", "numero": "0001369-17.2017.4.01.3606", "numero_digitos": "00013691720174013606", "tipo": "Acórdão",
+                       "relator": "CHARLES RENAUD", "orgao": "QUINTA TURMA", "data_julgamento": "10/03/2024", "ementa": "Dano moral coletivo. Ação civil pública.",
+                       "decisao": "Decide a Quinta Turma, por maioria, negar provimento."}
+                assert gravar_recibo(_d1) and gravar_recibo(_d2)
+                r = _buscar_recibos("incapacidade", None)
+                assert "1 de 2" in r and "TNU00033758" in r and "ZERO requisição" in r and "🗳️ unânime" in r, r
+                assert "1174043" in _buscar_recibos("", [["dano moral", "dano material"], ["coletiv$"]])
+                assert "1174043" not in _buscar_recibos("incapacidade", None)
+                assert "TNU00033758" in _buscar_recibos("", None, nr_processo="0011441-43.2015")
+                assert "BUSCA LOCAL NÃO REALIZADA" in _buscar_recibos("", None, nr_processo="123")
+                assert "BUSCA LOCAL NÃO REALIZADA" in _buscar_recibos("", None)
+                assert "1174043" in _buscar_recibos("", None, relator="charles") and "TNU00033758" not in _buscar_recibos("", None, relator="charles")
+                assert "TNU00033758" in _buscar_recibos("incapacidade", None, base="tnu") and "TNU00033758" not in _buscar_recibos("incapacidade", None, base="trf1") and "BUSCA LOCAL NÃO REALIZADA" in _buscar_recibos("x", None, base="zzz")
+                assert "nenhum" in _buscar_recibos("palavrainexistente", None).lower() or "0 de 2" in _buscar_recibos("palavrainexistente", None)
+                # recibo adulterado sai da busca
+                _p = _arq_recibo("1174043")
+                _j = json.load(open(_p, encoding="utf-8")); _j["texto"] += " adulterado"
+                json.dump(_j, open(_p, "w", encoding="utf-8"))
+                assert "1174043" not in _buscar_recibos("", [["dano moral"]])
+            finally:
+                globals()["DIR_RECIBOS"] = _dr_antes
+        # diário de erros (arquivo temporário; nada de conteúdo da busca)
+        with _tempfile.TemporaryDirectory() as _tmp:
+            _ae = globals()["_ARQUIVO_ERROS"]
+            globals()["_ARQUIVO_ERROS"] = os.path.join(_tmp, "erros.jsonl")
+            try:
+                assert _tipo_do_erro("HTTP 503 do portal") == "http_503" and _tipo_do_erro("tempo esgotado") == "timeout"
+                assert _tipo_do_erro("disjuntor em pausa por mais 10 min") == "limite_de_ritmo" and _tipo_do_erro("Muitos Usuários") == "portal_congestionado"
+                _e = _registrar_erro("buscar_jurisprudencia_trf1", texto="[PESQUISA NÃO REALIZADA — HTTP 503 em 0011441-43.2015.4.03.6301 \"dano moral coletivo\"]",
+                                     args={"consulta": "dano moral secreto", "grupos": [["a", "b"], ["c"]], "relator": "Fulano de Tal", "pagina": 2, "tipo": ["ACORDAO"]}, ms=1234)
+                assert _e and "secreto" not in json.dumps(_e) and "Fulano" not in json.dumps(_e) and "0011441" not in json.dumps(_e), _e
+                assert _e["args"]["pagina"] == 2 and _e["args"]["tipo"] == ["ACORDAO"] and "2 grupo(s), 3 termo(s)" in _e["args"]["grupos"].__str__() and _e["tipo"] == "http_503"
+                assert oct(os.stat(globals()["_ARQUIVO_ERROS"]).st_mode)[-3:] == "600"
+                _ent = _ler_erros(30)
+                assert len(_ent) == 1 and "http_503" in _resumir_erros(_ent) and "Relatório técnico" in _relatorio_erros(_ent) and "issues/new" in _relatorio_erros(_ent)
+                assert "Nenhum erro" in _resumir_erros([])
+                # o decorador anota resposta de falha, ignora ritmo local e não quebra a ferramenta
+                async def _ferr_falha(): return "[PESQUISA NÃO REALIZADA — HTTP 502]"
+                async def _ferr_ritmo(): return "[PESQUISA NÃO REALIZADA — disjuntor em pausa]"
+                _ferr_falha.__name__ = "obter_decisao_trf1"; _ferr_ritmo.__name__ = "obter_decisao_trf1"
+                asyncio.run(_diario(_ferr_falha)()); asyncio.run(_diario(_ferr_ritmo)())
+                assert len(_ler_erros(30)) == 2, len(_ler_erros(30))
+            finally:
+                globals()["_ARQUIVO_ERROS"] = _ae
+
+
+        # --- julgados que citam / linha do tempo (parte sem rede) ---
+        assert _sinal_afastamento("o caso é distinto: hipótese diversa da do precedente") and not _sinal_afastamento("aplica-se o precedente ao caso")
+        _jan = _janelas_destacadas({"ementa": "a " * 200 + "conforme «0011441-43.2015.4.03.6301» firmou a tese", "decisao": ""})
+        assert len(_jan) == 1 and "«0011441-43.2015.4.03.6301»" in _jan[0] and len(_jan[0]) < 700, _jan
+        assert _janelas_destacadas({"ementa": "sem destaque", "decisao": ""}) == []
+        _lt = _formatar_linha_do_tempo([{"ano": 2023, "total": 120, "julgamentos": 40, "res": [("provido", 25), ("desprovido", 15)]}], "x · 2023–2023")
+        assert "| 2023 | 120 | 40 | 25 provido, 15 desprovido |" in _lt and "nunca prova de superação" in _lt and not _lt.startswith("[PESQUISA")
+        assert _formatar_linha_do_tempo([{"ano": 2023, "total": 1, "julgamentos": 1, "res": []}], "x", "parou em 2024").startswith("[PESQUISA INCOMPLETA — parou em 2024]")
+        assert "Erro de parâmetro" in asyncio.run(_linha_do_tempo("", None, None, None, None))
+        assert "Erro de parâmetro" in asyncio.run(_linha_do_tempo("tese", None, None, 2010, 2020)) and "Erro de parâmetro" in asyncio.run(_julgados_que_citam("123", "trf1", 5))
 
         print("selftest offline OK")
 

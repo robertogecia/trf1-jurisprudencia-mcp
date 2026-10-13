@@ -52,7 +52,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 
-VERSAO = "1.5.3"
+VERSAO = "1.5.4"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -1345,6 +1345,54 @@ def _votacao_do_documento(d: dict) -> str:
 
 
 _FATOS_MAX = 1200
+# TESE DA EMENTA (porte do TJRO v1.29.0, H06): tese literal da ementa do modelo CNJ ("IV. Dispositivo e tese … Tese de julgamento: …").
+# A busca corta a ementa em 800 caracteres e a tese fica nos ÚLTIMOS itens: sem esta linha ela some do resultado.
+_TESE_MAX = 1000
+_RE_TESE_ROTULO = re.compile(r"\bteses? de julgamento ?:? ?", re.ASCII)
+_RE_ITEM_TESE = re.compile(r"(?<![^ ])\d{1,2}\. ")
+
+
+def _tese_da_ementa(texto: str, teto: int = _TESE_MAX):
+    t = _sem_destaque(str(texto or ""))
+    iv = next((x for x in _secoes_da_ementa(t, 0, len(t)) if x["nome"] in ("dispositivo e tese", "dispositivo")), None)
+    if not iv:
+        return None
+    seg = t[iv["a"]:iv["b"]]
+    m = _RE_TESE_ROTULO.search(_norm1(seg))
+    if not m:
+        return None
+    tese = re.sub(r"\s+", " ", seg[m.end():]).strip()
+    if not tese:
+        return None
+    inicios = [mm.start() for mm in _RE_ITEM_TESE.finditer(tese)]
+    total = len(inicios) if len(inicios) >= 2 and inicios[0] < 5 else 1
+    if len(tese) <= teto:
+        return {"texto": tese, "total": total, "exibidos": total, "completa": True}
+    if total > 1:
+        ate = [p for p in inicios if 0 < p <= teto]
+        if ate:
+            p = ate[-1]
+            return {"texto": tese[:p].rstrip(" "), "total": total, "exibidos": inicios.index(p), "completa": False}
+    fim = tese.rfind(". ", 0, teto)
+    corte = tese[:fim + 1] if fim > 0 else re.sub(r" \S*$", "", tese[:teto])
+    return {"texto": corte.strip(), "total": total, "exibidos": 0, "completa": False}
+
+
+def _linha_tese(te: dict) -> str:
+    inc = "" if te["completa"] else " […]"
+    aviso = "" if te["completa"] else (f" ⚠️ TESE INCOMPLETA: {te['exibidos']} de {te['total']} itens" if te["total"] > 1 else " ⚠️ TESE INCOMPLETA: trecho parcial") + "; abra o inteiro teor antes de fichar."
+    return f'TESE DA EMENTA (literal; tese enunciada pelo órgão, não prova de ratio): «{te["texto"]}{inc}»{aviso}'
+
+
+def _linha_tese_da_busca(ementa: str) -> str:
+    """Só quando a tese NÃO cabe no trecho de ementa que a busca mostra (senão repetiria o que já está na tela)."""
+    te = _tese_da_ementa(ementa)
+    if not te:
+        return ""
+    visto = _norm1(_trecho_centrado(ementa, TRECHO_EMENTA))
+    if _norm1(te["texto"]) in visto:
+        return ""
+    return _linha_tese(te)
 _RE_LIXO_WORD = re.compile(r"^\s*(?:\d+(?:\.\d+)?\s+\d+x\d+\s+)?(?:Normal\s+)?(?:\d+\s+){0,3}(?:(?:false|true)\s+){1,3}(?:[A-Z]{2}-[A-Z]{2}\s+|X-NONE\s+){1,3}(?:MicrosoftInternetExplorer\d\s+)?")
 _PARTES_FATOS = (r"(?:agravante|agravad[oa]s?|apelante|apelad[oa]s?|recorrente|recorrid[oa]s?|embargante|embargad[oa]s?|autor(?:a|es|as)?|r[ée]u|"
                  r"requerente|requerid[oa]s?|parte|banco|impetrante|exequente|executad[oa]s?|INSS|Instituto|Uni[ãa]o|Fazenda|Caixa|requerente|suscitante)")
@@ -1736,6 +1784,9 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
         if len(em) > TRECHO_EMENTA:
             houve_corte = True
         linhas.append(f"  Ementa (trecho): {_trecho_centrado(em, TRECHO_EMENTA) or '—'}")
+        _lt = _linha_tese_da_busca(em)
+        if _lt:
+            linhas.append(f"  {_lt}")
         if d.get("decisao"):
             linhas.append(f"  Dispositivo: {_trecho_centrado(d['decisao'], TRECHO_DECISAO)}")
         irmaos = por_numero.get(d["numero_digitos"], [])
@@ -4333,6 +4384,20 @@ if __name__ == "__main__":
         assert _aviso_data_sessao({"data_julgamento": "23/07/2025", "decisao": "Na sessão virtual de 21/07/2025 a 25/07/2025, por unanimidade."}) == ""
         assert _aviso_data_sessao({"data_julgamento": "04/02/2026", "decisao": "por unanimidade, negar provimento"}) == ""
         assert "TRECHO do nome" in _format_busca([], 0, {"consulta_montada": "x", "pagina": 1, "por_pagina": 10, "filtros": {"orgao_julgador": "PRIMEIRA TURMA RECURSAL"}, "base": "trf1"})
+        _emt = ("EMENTA DIREITO CIVIL. I. CASO EM EXAME Apelação. II. QUESTÃO EM DISCUSSÃO Dano moral. III. RAZÕES DE DECIDIR Fundamento. IV. DISPOSITIVO E TESE Recurso provido. "
+                "Tese de julgamento: 1. A negativação indevida gera dano moral. 2. O valor segue a razoabilidade. Dispositivos relevantes citados: CDC, art. 42.")
+        _te = _tese_da_ementa(_emt)
+        assert _te == {"texto": "1. A negativação indevida gera dano moral. 2. O valor segue a razoabilidade.", "total": 2, "exibidos": 2, "completa": True}, _te
+        assert _tese_da_ementa("EMENTA sem seções. Recurso provido.") is None and _tese_da_ementa("I. CASO EM EXAME x. IV. DISPOSITIVO E TESE Recurso provido.") is None
+        _longa = "I. CASO EM EXAME x. IV. DISPOSITIVO E TESE Recurso provido. Teses de julgamento: " + " ".join(f"{n}. " + "Item longo da tese. " * 20 for n in (1, 2, 3, 4))
+        _tl = _tese_da_ementa(_longa)
+        assert _tl["completa"] is False and _tl["total"] == 4 and _tl["exibidos"] == 2 and len(_tl["texto"]) <= 1000 and "3. Item" not in _tl["texto"], _tl
+        assert "TESE INCOMPLETA: 2 de 4 itens; abra o inteiro teor antes de fichar" in _linha_tese(_tl)
+        assert _linha_tese(_te).startswith("TESE DA EMENTA (literal; tese enunciada pelo órgão, não prova de ratio): «1. A negativação")
+        # na busca: só aparece quando a tese NÃO cabe no trecho de ementa mostrado (senão repetiria a tela); destaque «x» do portal não entra na tese
+        _emlonga = "DIREITO X. I. CASO EM EXAME " + "texto do caso. " * 120 + "IV. DISPOSITIVO E TESE Recurso «provido». Tese de julgamento: 1. A tese «literal» do órgão."
+        assert "literal" in _linha_tese_da_busca(_emlonga) and "«" not in _linha_tese_da_busca(_emlonga).split("«", 1)[1].split("»", 1)[0]
+        assert _linha_tese_da_busca(_emt) == "" and _linha_tese_da_busca("") == ""
         print("selftest offline OK")
 
         if "--online" in sys.argv:

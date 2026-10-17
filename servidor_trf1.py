@@ -278,6 +278,15 @@ _RE_PONTUACAO = re.compile(r"[^\w\s$?«»]", re.UNICODE)  # aspas internas e hí
 _RE_CAMPO_SUFIXO = re.compile(r"\[(-?[A-Za-z]{2,4})\]\s*$")
 
 
+ENTRADA_TEXTO_MAX = 5000   # v1.6.0: teto de `consulta`/`trecho` nas ferramentas (entrada gigante só gasta CPU)
+
+
+def _validar_tamanho(rotulo: str, valor: Any) -> None:
+    n = len(valor) if isinstance(valor, str) else 0
+    if n > ENTRADA_TEXTO_MAX:
+        raise ValueError(f"{rotulo} com {n} caracteres; o máximo é {ENTRADA_TEXTO_MAX}. Reduza a {rotulo} ao que interessa (o que decide é o trecho central, não o texto inteiro).")
+
+
 def _termo_para_query(termo: str) -> str:
     t = re.sub(r"\s+", " ", (termo or "")).strip()[:TERMO_MAX_CHARS]
     m_campo = _RE_CAMPO_SUFIXO.search(t)
@@ -682,12 +691,13 @@ def norm(t: str) -> str:
     travessões unificados, espaço único, pontuação colada."""
     t = unicodedata.normalize("NFKC", t or "")
     t = _fold(t)
+    t = re.sub(r"\s+", " ", t)   # v1.6.0: colapsa ANTES — `\s+([.,;:)\]])` era quadrático em corridas longas de espaços
     t = re.sub(r"\bn\s*[.o°]{1,3}\s*(?=\d)", "n ", t)
     t = re.sub(r"§\s+", "§", t)
     t = re.sub(r"[“”‘’\"'`´]", "'", t)
     t = re.sub(r"[–—-]", "-", t)
-    t = re.sub(r"\s+([.,;:)\]])", r"\1", t)
-    t = re.sub(r"([(\[])\s+", r"\1", t)
+    t = re.sub(r" ([.,;:)\]])", r"\1", t)
+    t = re.sub(r"([(\[]) ", r"\1", t)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -1713,8 +1723,19 @@ def gravar_recibo(d: dict) -> str:
         os.makedirs(DIR_RECIBOS, mode=0o700, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(DIR_RECIBOS, 0o700)
+        caminho = _arq_recibo(str(d.get("id") or ""))
+        # v1.6.0: regravar não pode PERDER o inteiro teor que um recibo anterior já tinha (download do eproc falhou, ou o documento
+        # caiu além do teto de 3): mescla o inteiro teor existente e recalcula texto/sha256 sobre o conteúdo final.
+        if not (d.get("inteiro_teor_texto") or d.get("inteiro_teor_embutido")):
+            try:
+                with open(caminho, encoding="utf-8") as f:
+                    antigo = json.load(f)
+                it_antigo = antigo.get("inteiro_teor") if isinstance(antigo, dict) else ""
+                if isinstance(it_antigo, str) and it_antigo.strip():
+                    d = dict(d, inteiro_teor_texto=it_antigo)
+            except (OSError, ValueError):
+                pass
         rec = _campos_de_custodia(d, "decisao")
-        caminho = _arq_recibo(rec["id_documento"])
         _escrever_json_atomico(caminho, rec)
         _desindexar_busca(DIR_RECIBOS, [rec["id_documento"]])
         return caminho
@@ -1722,14 +1743,51 @@ def gravar_recibo(d: dict) -> str:
         return ""
 
 
-def _escrever_json_atomico(caminho: str, obj: Any) -> int:
-    """Escreve JSON em arquivo 0600 por arquivo temporário + rename; devolve os bytes escritos."""
+def _remover_tmp(tmp: str) -> None:
+    with contextlib.suppress(OSError):
+        os.unlink(tmp)
+
+
+def _substituir_arquivo(tmp: str, destino: str) -> None:
+    """os.replace; no Windows (arquivo aberto por antivírus/indexador), até 3 tentativas com espera curta (v1.6.0)."""
+    tentativas = 3 if sys.platform == "win32" else 1
+    for k in range(tentativas):
+        try:
+            os.replace(tmp, destino)
+            return
+        except OSError:
+            if k == tentativas - 1:
+                raise
+            time.sleep(0.05 * (k + 1))
+
+
+def _escrever_json_atomico(caminho: str, obj: Any, so_criar: bool = False) -> int | None:
+    """Escreve JSON em arquivo 0600 por arquivo temporário + rename; devolve os bytes escritos. O temporário NUNCA fica para trás
+    (try/finally). `so_criar=True` (v1.6.0, recibo da busca): o alvo só pode ser CRIADO, jamais substituído — grava o tmp e faz
+    os.link(tmp, alvo); FileExistsError = "já existe", devolve None sem gravar. Sem suporte a link no FS (alguns Windows), cai para
+    open O_EXCL escrevendo direto."""
     tmp = f"{caminho}.{os.getpid()}.tmp"
     bruto = json.dumps(obj, ensure_ascii=False)
-    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
-        f.write(bruto)
-    os.replace(tmp, caminho)
-    return len(bruto.encode("utf-8"))
+    try:
+        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+            f.write(bruto)
+        if so_criar:
+            try:
+                os.link(tmp, caminho)
+            except FileExistsError:
+                return None
+            except (OSError, NotImplementedError, AttributeError):
+                try:
+                    fd = os.open(caminho, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    return None
+                with open(fd, "w", encoding="utf-8") as f:
+                    f.write(bruto)
+        else:
+            _substituir_arquivo(tmp, caminho)
+        return len(bruto.encode("utf-8"))
+    finally:
+        _remover_tmp(tmp)
 
 
 # --- Recibo gravado pela própria busca (porte do TJRO v1.31.0, H01) -------------------------------------------- #
@@ -1772,30 +1830,64 @@ def _desindexar_busca(pasta: str, ids: list[str]) -> None:
             _gravar_indice_busca(pasta, idx)
 
 
+def _num_indice(x: Any) -> int:
+    """Número tolerante do índice de poda (v1.6.0, igual ao Node): só número finito (não bool) ou string numérica; resto = 0."""
+    if isinstance(x, bool) or x is None:
+        return 0
+    try:
+        v = float(x) if isinstance(x, (int, float, str)) else 0.0
+    except ValueError:
+        return 0
+    return int(v) if math.isfinite(v) else 0
+
+
+def _entrada_indice(v: Any) -> tuple[int, int]:
+    """(bytes, instante_ms) de uma entrada do índice; entrada malformada (escalar, `[bytes]` sem instante, lixo) não derruba a poda."""
+    if not isinstance(v, (list, tuple)):
+        return 0, 0
+    return _num_indice(v[0]) if len(v) > 0 else 0, _num_indice(v[1]) if len(v) > 1 else 0
+
+
 def _podar_recibos_de_busca(pasta: str | None = None, max_bytes: int | None = None) -> int:
     """Acima do teto saem os recibos de BUSCA mais antigos, até 80% do teto; nunca os de decisão (nem o arquivo que, apesar do índice,
-    não traga `origem: "busca"`). Devolve quantos removeu."""
+    não traga `origem: "busca"`). Devolve quantos removeu. v1.6.0: o arquivo é primeiro RENOMEADO para `<id>.json.podando`, relido e só
+    apagado se a origem for "busca" — um recibo de decisão gravado entre a leitura e o unlink não se perde (se não for "busca", volta)."""
     removidos = 0
     try:
         pasta = pasta or DIR_RECIBOS
         teto = max_bytes if max_bytes is not None else _recibos_busca_max_bytes()
         idx = _ler_indice_busca(pasta)
-        total = sum(int((v or [0])[0] or 0) for v in idx.values())
+        total = sum(_entrada_indice(v)[0] for v in idx.values())
         if total <= teto:
             return 0
-        for ident, v in sorted(idx.items(), key=lambda kv: (kv[1] or [0, 0])[1] or 0):
+        for ident, v in sorted(idx.items(), key=lambda kv: (_entrada_indice(kv[1])[1], str(kv[0]))):
             if total <= teto * 0.8:
                 break
             cam = os.path.join(pasta, re.sub(r"[^A-Za-z0-9]", "", str(ident)) + ".json")
+            pod = cam + ".podando"
             try:
-                with open(cam, encoding="utf-8") as f:
-                    r = json.load(f)
-                if isinstance(r, dict) and r.get("origem") == "busca":
-                    os.unlink(cam)
+                os.replace(cam, pod)
+                try:
+                    with open(pod, encoding="utf-8") as f:
+                        r = json.load(f)
+                    eh_busca = isinstance(r, dict) and r.get("origem") == "busca"
+                except Exception:
+                    eh_busca = False
+                if eh_busca:
+                    os.unlink(pod)
                     removidos += 1
+                else:
+                    try:
+                        os.link(pod, cam)      # volta sem sobrescrever o que a decisão tenha gravado nesse meio-tempo
+                    except FileExistsError:
+                        pass
+                    except OSError:
+                        if not os.path.exists(cam):
+                            os.replace(pod, cam)
+                    _remover_tmp(pod)
             except Exception:
-                pass
-            total -= int((v or [0])[0] or 0)
+                pass   # arquivo já removido ou ilegível: segue
+            total -= _entrada_indice(v)[0]
             idx.pop(ident, None)
         _gravar_indice_busca(pasta, idx)
     except Exception:
@@ -1820,7 +1912,10 @@ def gravar_recibos_da_busca(docs: list[dict], pasta: str | None = None) -> int:
             if os.path.exists(alvo) or os.path.exists(alvo + ".inconsistente"):
                 continue
             rec = _campos_de_custodia(d, "busca")
-            novos[rec["id_documento"]] = [_escrever_json_atomico(alvo, rec), int(time.time() * 1000)]
+            tam = _escrever_json_atomico(alvo, rec, so_criar=True)   # v1.6.0: só CRIA (um recibo de decisão gravado agora não é substituído)
+            if tam is None:
+                continue
+            novos[rec["id_documento"]] = [tam, int(time.time() * 1000)]
             n += 1
         if n:
             idx = _ler_indice_busca(pasta)
@@ -1833,7 +1928,9 @@ def gravar_recibos_da_busca(docs: list[dict], pasta: str | None = None) -> int:
 
 
 def ler_recibo(ident: str) -> dict | None:
-    """sha256 divergente = corrupção/edição → posto de lado (.inconsistente), None."""
+    """sha256 divergente ou JSON inválido = corrupção/edição → posto de lado (.inconsistente), None. v1.6.0: erro de E/S (permissão,
+    disco, arquivo preso) devolve None SEM renomear — recibo válido não vai para quarentena por falha de leitura. A quarentena nunca
+    apaga uma quarentena anterior (sufixo com o instante se o nome já existe)."""
     caminho = _arq_recibo(ident)
     try:
         with open(caminho, encoding="utf-8") as f:
@@ -1842,12 +1939,17 @@ def ler_recibo(ident: str) -> dict | None:
             and hashlib.sha256(rec["texto"].encode("utf-8")).hexdigest() == rec.get("sha256")
     except FileNotFoundError:
         return None
-    except Exception:
+    except ValueError:        # JSONDecodeError e UnicodeDecodeError
         ok, rec = False, None
+    except OSError:
+        return None
     if ok:
         return rec
+    destino = caminho + ".inconsistente"
+    if os.path.exists(destino):
+        destino = f"{destino}.{int(time.time() * 1000)}"
     with contextlib.suppress(OSError):
-        os.replace(caminho, caminho + ".inconsistente")
+        os.replace(caminho, destino)
     return None
 
 
@@ -1912,10 +2014,16 @@ def _citacao(d: dict) -> str:
     return "(" + ", ".join(partes) + ")"
 
 
-def _nivel_verificacao(d: dict, cortado: bool = False) -> str:
+def _nivel_verificacao(d: dict, cortado: bool = False, exibido: str = "completo") -> str:
     """O nível vai DENTRO da linha de citação (determinação 8): rodapé solto se perde quando a
     citação é copiada para a minuta. "inteiro teor lido" só quando o texto integral veio E foi
-    mostrado inteiro; cortado pelo orçamento → "EM PARTE" (não serve para afirmar ausência)."""
+    mostrado inteiro; cortado pelo orçamento → "EM PARTE" (não serve para afirmar ausência).
+    v1.6.0: o nível reflete o que foi EXIBIDO — `exibido="lista"` (a lista da busca mostra só ementa e trecho do dispositivo) →
+    "só ementa/índice"; `exibido="triagem"` (nada do inteiro teor aparece) → "triagem — nada lido; reabra no modo completo para citar"."""
+    if exibido == "triagem":
+        return "triagem — nada lido; reabra no modo completo para citar"
+    if exibido == "lista":
+        return "só ementa/índice"
     if d.get("inteiro_teor_texto") or d.get("inteiro_teor_embutido"):
         return "inteiro teor lido EM PARTE" if cortado else "inteiro teor lido"
     return "só ementa/índice"
@@ -2207,7 +2315,7 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
         if d.get("fonte_publicacao"):
             meta_l.append(f"Fonte: {d['fonte_publicacao']}")
         linhas.append("  " + " · ".join(meta_l))
-        linhas.append(f"  Citação: {_citacao_com_link(d)} — verificação: {_nivel_verificacao(d)}")
+        linhas.append(f"  Citação: {_citacao_com_link(d)} — verificação: {_nivel_verificacao(d, exibido='lista')}")
         if _rec is not None:
             linhas.append(f"  🆕 JULGADO RECENTE ({_rec} dia(s)): pode ainda não ter sido publicado e cabe embargos de declaração; confira a publicação antes de citar.")
         _vot = _votacao_do_documento(d)
@@ -2396,7 +2504,7 @@ def _format_triagem(docs: list[dict], numero: str, total: int) -> str:
         linhas.append("- Peças: " + " · ".join(
             f"{x.get('tipo') or 'documento'} id {x['id']}" + (f" ({_link_documento_especifico(x)})" if _link_documento_especifico(x) else "") for x in ds))
         cz = any(x.get("inteiro_teor_texto") or x.get("inteiro_teor_embutido") for x in ds)
-        linhas.append(f"- Citação: {_citacao_com_link(rep)} — verificação: {_nivel_verificacao(rep)}")
+        linhas.append(f"- Citação: {_citacao_com_link(rep)} — verificação: {_nivel_verificacao(rep, exibido='triagem')}")
         if rep.get("decisao"):
             linhas.append(f"- Dispositivo (início, literal): «{_trecho_centrado(rep['decisao'], TRIAGEM_DISPOSITIVO_MAX)}»")
         te = _tese_da_ementa(rep.get("ementa") or "")
@@ -2568,13 +2676,14 @@ def _transacao(fn, obrigatoria: bool = False):
                 )
         estado = _ler_estado()
         resultado = fn(estado)
+        tmp = f"{_ARQUIVO_ESTADO_DISJUNTOR}.{os.getpid()}.tmp"
         try:
-            tmp = f"{_ARQUIVO_ESTADO_DISJUNTOR}.{os.getpid()}.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(estado, f)
-            os.replace(tmp, _ARQUIVO_ESTADO_DISJUNTOR)
+            _substituir_arquivo(tmp, _ARQUIVO_ESTADO_DISJUNTOR)
             _persistencia_indisponivel = None
         except Exception as e:
+            _remover_tmp(tmp)
             _persistencia_indisponivel = getattr(e, "strerror", None) or type(e).__name__
             if obrigatoria:
                 raise PesquisaNaoRealizada(
@@ -2817,9 +2926,12 @@ def _ritmo_anotar(t_ms: float, op: str, res: str, status: int | None = None, dur
             with open(arquivo, encoding="utf-8") as f:
                 linhas = [x for x in f.read().split("\n") if x]
             tmp = f"{arquivo}.{os.getpid()}.tmp"
-            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
-                f.write("\n".join(linhas[-_RITMO_MAX_LINHAS:]) + "\n")
-            os.replace(tmp, arquivo)
+            try:
+                with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+                    f.write("\n".join(linhas[-_RITMO_MAX_LINHAS:]) + "\n")
+                _substituir_arquivo(tmp, arquivo)
+            finally:
+                _remover_tmp(tmp)
     except Exception:
         pass   # o livro-razão nunca derruba uma consulta
 
@@ -2835,7 +2947,7 @@ def _ritmo_ler(arquivo: str | None = None) -> list[dict]:
                     d = json.loads(linha)
                 except Exception:
                     continue
-                if isinstance(d, dict) and isinstance(d.get("t"), (int, float)) and not isinstance(d.get("t"), bool):
+                if isinstance(d, dict) and isinstance(d.get("t"), (int, float)) and not isinstance(d.get("t"), bool) and math.isfinite(d["t"]):
                     out.append(d)
         return sorted(out, key=lambda x: x["t"])
     except Exception:
@@ -3471,6 +3583,7 @@ def _rankear_por_consulta(consulta, recibos: list[dict], limite: int = 10) -> li
 
 def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_processo: str = "", id_documento: str = "",
                     relator: str = "", base: str = "") -> str:
+    _validar_tamanho("consulta", consulta)
     palavras = [p for p in re.split(r"[^a-z0-9*$]+", norm(str(consulta or ""))) if p and p.rstrip("*$") and p.rstrip("*$") not in _STOP_RECIBOS]
     gs = []
     if isinstance(grupos, list):
@@ -3536,8 +3649,8 @@ def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_pr
          f"**Recibos locais do TRF1/TNU — {len(achados)} de {total_geral} documento(s) já lidos nesta máquina atendem a «{termos_mostrados}»"
          f"{(' em ' + filtro_txt) if filtro_txt else ''} · ZERO requisição ao portal**"),
         "⚠️ Isto NÃO é pesquisa no acervo do CJF: só olha o que a busca e obter_decisao_trf1 já trouxeram para esta máquina. Zero aqui NUNCA é "
-        "\"não localizado\" — para isso, buscar_jurisprudencia_trf1. Recibo da base trf1 guarda ementa e dispositivo (sem voto); o inteiro teor só existe nos da TNU "
-        "lidos por obter_decisao_trf1. Recibo de BUSCA guarda só o que a lista trouxe (na TNU, sem inteiro teor) e não prova que o processo esteja completo.",
+        "\"não localizado\" — para isso, buscar_jurisprudencia_trf1. Recibo da base trf1 guarda ementa e dispositivo (sem voto); o inteiro teor só existe nos recibos da TNU "
+        "(lidos por obter_decisao_trf1) e do colegiado (embutido no resultado). Recibo de BUSCA guarda só o que a lista trouxe (na TNU, sem inteiro teor) e não prova que o processo esteja completo.",
         "",
     ]
     if not todos:
@@ -3553,7 +3666,8 @@ def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_pr
         tre = _trecho_em_volta(r.get("inteiro_teor") or r["texto"], r["_tn"], pat)
         if tre:
             linhas.append(f"   «…{tre}…»")
-        cust = ("inteiro teor da TNU incluído" if r.get("inteiro_teor_incluido") else "só ementa/dispositivo (sem voto)")
+        cust = (f"inteiro teor {BASES.get(r.get('base') or 'trf1', BASES['trf1'])['rotulo']} incluído" if r.get("inteiro_teor_incluido")
+                else "só ementa/dispositivo (sem voto)")
         orig = "da busca" if r.get("origem") == "busca" else "de decisão (obter_decisao_trf1)"
         linhas.append(f"   recibo {orig}, lido do portal em {str(r.get('obtido_em') or '?')[:16].replace('T', ' ')} · {cust}")
     if len(achados) > lim:
@@ -3853,6 +3967,7 @@ def _formatar_linha_do_tempo(linhas: list[dict], filtros: str, incompleta: str =
 
 async def _linha_do_tempo(consulta: str, grupos, orgao_julgador, ano_inicio, ano_fim) -> str:
     try:
+        _validar_tamanho("consulta", consulta)
         consulta_m = _montar_consulta(consulta, grupos)
         if not consulta_m:
             raise ValueError("informe `consulta` ou `grupos`: a linha do tempo precisa de uma tese")
@@ -3948,6 +4063,7 @@ async def _buscar(consulta: str, tipo, fonte, grupos, relator, orgao_julgador, c
                   base: str = "trf1", tipo_acordao=None) -> str:
     consulta_montada = ""
     try:
+        _validar_tamanho("consulta", consulta)
         base = _validar_base(base)
         tipos = _validar_tipos(tipo, base)
         fontes = _validar_fontes(fonte) if BASES[base]["fonte"] else []
@@ -4065,6 +4181,10 @@ async def _verificar_citacao(numero: str, trecho: str, base: str = "trf1") -> st
         return f"Número muito curto para localizar com segurança: {numero!r}."
     if not (trecho or "").strip():
         return "Informe o trecho que pretende citar entre aspas."
+    try:
+        _validar_tamanho("trecho", trecho)
+    except ValueError as e:
+        return _erro_de_parametro(e)
     origem = "portal"
     docs: list[dict] = []
     dados: dict = {}
@@ -4362,7 +4482,8 @@ try:
         Returns:
             Cabeçalho com a contagem de documentos sob o número; para cada um, citação pronta
             terminando em "— verificação: <nível>" (só ementa/índice · inteiro teor lido · inteiro
-            teor lido EM PARTE, quando cortado pelo orçamento — nunca promova EM PARTE a pleno),
+            teor lido EM PARTE, quando cortado pelo orçamento — nunca promova EM PARTE a pleno; no modo
+            triagem: "triagem — nada lido; reabra no modo completo para citar"),
             `orgao_fonte`, sinais do julgado (Cita: …), metadados, ementa integral, dispositivo
             integral, inteiro teor (TNU) e a nota de inteiro teor; no fim, o que preencher na ficha.
             Saída limitada a ~50 mil caracteres. Falha sai como [PESQUISA NÃO REALIZADA — motivo].
@@ -5570,7 +5691,7 @@ if __name__ == "__main__":
         _tri = _format_triagem([d_tnu], d_tnu["numero"], 1)
         _comp = _format_decisao([d_tnu], d_tnu["numero"], 1)
         assert "Triagem do número" in _tri and "Resultado declarado: desprovido" in _tri and "Votação declarada: unânime" in _tri and "FATOS DO JULGADO" in _tri, _tri[:900]
-        assert "Cita: Súmula 42 · Tema 692" in _tri and "id TNU00033758" in _tri and "eproctnu-jur.cjf.jus.br" in _tri and "verificação: inteiro teor lido" in _tri
+        assert "Cita: Súmula 42 · Tema 692" in _tri and "id TNU00033758" in _tri and "eproctnu-jur.cjf.jus.br" in _tri and "verificação: triagem — nada lido; reabra no modo completo para citar" in _tri and "verificação: inteiro teor lido" not in _tri
         assert "Inteiro teor (literal" not in _tri and "Ementa (integral" not in _tri and len(_tri) < len(_comp) * 0.25, (len(_tri), len(_comp))
         _tri2 = _format_triagem([d0, irmao], d0["numero"], 2)   # dois julgamentos de datas diferentes: dois blocos
         assert _tri2.count("\n### ") == 2 and "Sem inteiro teor nesta base" in _tri2, _tri2[:700]
@@ -5732,6 +5853,114 @@ if __name__ == "__main__":
             finally:
                 globals()["_ARQUIVO_RITMO"] = _arq0
                 _limpar_estado()
+
+        # ====================== v1.6.0 — correções do red team (lote 2) ======================
+        _dr_rt = globals()["DIR_RECIBOS"]
+        # (1) o nível de verificação reflete o que foi EXIBIDO
+        _tri_n = _format_triagem([d_tnu], d_tnu["numero"], 1)
+        assert "— verificação: triagem — nada lido; reabra no modo completo para citar" in _tri_n and "verificação: inteiro teor lido" not in _tri_n
+        _col = dict(d0, id="COL1", base="colegiado", inteiro_teor_embutido="texto do inteiro teor do colegiado " * 100)
+        _sl = _format_busca([_col], 1, _m1)
+        assert "— verificação: só ementa/índice" in _sl and "inteiro teor lido" not in _sl, _sl[:700]
+        assert "— verificação: inteiro teor lido" in _format_decisao([_col], _col["numero"], 1)   # o modo completo continua como estava
+        # (2) a busca só CRIA o recibo; a poda não apaga o que virou recibo de decisão
+        with _tempfile.TemporaryDirectory() as _t2:
+            globals()["DIR_RECIBOS"] = _t2
+            _cc0 = globals()["_campos_de_custodia"]
+            def _cc_corrida(d, origem="decisao"):
+                if origem == "busca":   # o recibo de decisão aparece ENTRE o `exists` e a gravação da busca
+                    _escrever_json_atomico(_arq_recibo(d["id"]), _cc0(d, "decisao"))
+                return _cc0(d, origem)
+            globals()["_campos_de_custodia"] = _cc_corrida
+            try:
+                assert gravar_recibos_da_busca([d0], _t2) == 0
+            finally:
+                globals()["_campos_de_custodia"] = _cc0
+            assert ler_recibo(d0["id"])["origem"] == "decisao" and d0["id"] not in _ler_indice_busca(_t2)
+            _alvo = os.path.join(_t2, "X.json")
+            assert _escrever_json_atomico(_alvo, {"a": 1}, so_criar=True) > 0 and _escrever_json_atomico(_alvo, {"a": 2}, so_criar=True) is None
+            assert json.load(open(_alvo)) == {"a": 1} and not [x for x in os.listdir(_t2) if x.endswith(".tmp")]
+            # poda: recibo de decisão listado no índice sobrevive e nada fica como .podando; de busca sai
+            _dd = dict(d0, id="DEC1"); _bb = dict(d0, id="BUS1")
+            gravar_recibo(_dd); assert gravar_recibos_da_busca([_bb], _t2) == 1
+            _escrever_json_atomico(os.path.join(_t2, _INDICE_BUSCA), {"DEC1": [500, 1], "BUS1": [500, 2]})
+            assert _podar_recibos_de_busca(_t2, 100) == 1
+            assert ler_recibo("DEC1") and ler_recibo("BUS1") is None and not [x for x in os.listdir(_t2) if x.endswith(".podando")]
+        # (8) índice de poda malformado: mesmo resultado nas duas implementações (instante desempata por id)
+        with _tempfile.TemporaryDirectory() as _t8:
+            globals()["DIR_RECIBOS"] = _t8
+            assert gravar_recibos_da_busca([dict(d0, id=i) for i in ("A1", "A2", "A3")], _t8) == 3
+            _escrever_json_atomico(os.path.join(_t8, _INDICE_BUSCA), {"A1": [100], "A2": 5, "A3": [100, 10], "A4": None, "A5": "x"})
+            assert _podar_recibos_de_busca(_t8, 150) == 1
+            assert ler_recibo("A1") is None and ler_recibo("A2") and ler_recibo("A3")
+        # (3) regravar sem inteiro teor não apaga o que o recibo já tinha
+        with _tempfile.TemporaryDirectory() as _t3:
+            globals()["DIR_RECIBOS"] = _t3
+            gravar_recibo(d_tnu); _r1 = ler_recibo(d_tnu["id"])
+            assert _r1 and _r1["inteiro_teor"] and _r1["inteiro_teor_incluido"] is True
+            gravar_recibo({k: v for k, v in d_tnu.items() if k not in ("inteiro_teor_texto", "inteiro_teor_embutido")})
+            _r2 = ler_recibo(d_tnu["id"])   # ler_recibo confere o sha256: hash coerente com o conteúdo final
+            assert _r2 and _r2["inteiro_teor"] == _r1["inteiro_teor"] and _r2["inteiro_teor_incluido"] is True and _r2["texto"] == _r1["texto"] and _r2["origem"] == "decisao"
+        # (6) erro de E/S não põe recibo válido em quarentena; quarentena não apaga quarentena
+        with _tempfile.TemporaryDirectory() as _t6:
+            globals()["DIR_RECIBOS"] = _t6
+            gravar_recibo(d0); _cam = _arq_recibo(d0["id"])
+            os.chmod(_cam, 0)
+            try:
+                if os.access(_cam, os.R_OK):
+                    pass   # root: chmod não impede a leitura
+                else:
+                    assert ler_recibo(d0["id"]) is None and os.path.exists(_cam) and not os.path.exists(_cam + ".inconsistente")
+            finally:
+                os.chmod(_cam, 0o600)
+            assert ler_recibo(d0["id"])
+            for k in (1, 2):
+                open(_cam, "w").write("{ruim %d" % k)
+                assert ler_recibo(d0["id"]) is None
+            _q = sorted(x for x in os.listdir(_t6) if ".inconsistente" in x)
+            assert len(_q) == 2 and open(os.path.join(_t6, _q[0])).read() in ("{ruim 1", "{ruim 2") and {open(os.path.join(_t6, x)).read() for x in _q} == {"{ruim 1", "{ruim 2"}, _q
+        globals()["DIR_RECIBOS"] = _dr_rt
+        # (7) norm linear em corridas de espaço, e igual ao algoritmo antigo em entradas normais
+        def _norm_antiga(t):
+            t = unicodedata.normalize("NFKC", t or ""); t = _fold(t)
+            t = re.sub(r"\bn\s*[.o°]{1,3}\s*(?=\d)", "n ", t); t = re.sub(r"§\s+", "§", t)
+            t = re.sub(r"[“”‘’\"'`´]", "'", t); t = re.sub(r"[–—-]", "-", t)
+            t = re.sub(r"\s+([.,;:)\]])", r"\1", t); t = re.sub(r"([(\[])\s+", r"\1", t)
+            return re.sub(r"\s+", " ", t).strip()
+        _rng7 = __import__("random").Random(7)
+        _alf = ["a", "B", "ç", "n", "º", "5", ".", ",", ";", ":", "(", ")", "[", "]", " ", " ", "  ", "\n", "\t", "§", "“", "”", "-", "—", " ", "Art", "n.", "N°"]
+        for _ in range(600):
+            _s7 = "".join(_rng7.choice(_alf) for _ in range(_rng7.randint(0, 40)))
+            assert norm(_s7) == _norm_antiga(_s7), repr(_s7)
+        _t0 = time.time(); _longo = "a" + " " * 40000 + "b ."
+        assert norm(_longo) == "a b." and time.time() - _t0 < 1.0
+        _t0 = time.time(); _vt = _verificar_trecho({"ementa": _longo * 2}, "a" + " " * 40000 + "b ccc ddd eee fff ggg hhh")
+        assert time.time() - _t0 < 3.0 and not _vt["valido"]
+        assert asyncio.run(_verificar_citacao("0011441-43.2015.4.01.3500", "x" * 5001)).startswith("Erro de parâmetro")
+        assert asyncio.run(_buscar("y" * 5001, None, None, None, None, None, None, None, None, None, None, None, None, "julgamento", 1, 30)).startswith("Erro de parâmetro")
+        assert asyncio.run(_linha_do_tempo("y" * 5001, None, None, None, None)).startswith("Erro de parâmetro")
+        # (9) o .tmp não fica para trás quando o rename falha
+        with _tempfile.TemporaryDirectory() as _t9:
+            _dirdest = os.path.join(_t9, "destino"); os.mkdir(_dirdest)
+            try:
+                _escrever_json_atomico(_dirdest, {"a": 1}); assert False, "deveria falhar"
+            except OSError:
+                pass
+            assert not [x for x in os.listdir(_t9) if x.endswith(".tmp")], os.listdir(_t9)
+        # (10) `t` não finito no livro-razão não derruba o relatório
+        with _tempfile.TemporaryDirectory() as _t10:
+            _lr10 = os.path.join(_t10, "ritmo.jsonl")
+            open(_lr10, "w").write('{"t": NaN, "res": "ok"}\n{"t": Infinity, "res": "ok"}\n{"t": -Infinity}\n{"t": 1e400}\n{"t": 5000, "res": "ok", "op": "busca"}\n{"t": 9000, "res": "ok", "op": "busca"}\n')
+            assert [x["t"] for x in _ritmo_ler(_lr10)] == [5000, 9000]
+            assert "Relatório de ritmo" in _relatorio_de_ritmo(arquivo=_lr10)
+        # (12) o rótulo do recibo diz a base certa
+        with _tempfile.TemporaryDirectory() as _t12:
+            globals()["DIR_RECIBOS"] = _t12
+            gravar_recibo(_col); gravar_recibo(d_tnu)
+            _bc = _buscar_recibos("", None, id_documento="COL1", pasta=_t12)
+            assert "inteiro teor Colegiado CJF incluído" in _bc and "inteiro teor da TNU incluído" not in _bc and "só existe nos recibos da TNU" in _bc, _bc[:900]
+            assert "inteiro teor TNU incluído" in _buscar_recibos("", None, id_documento=d_tnu["id"], pasta=_t12)
+        globals()["DIR_RECIBOS"] = _dr_rt
         assert not os.path.exists(os.path.join(_recibos_reais, _INDICE_BUSCA)) or os.environ.get("TRF1_MCP_DIR_RECIBOS")   # a pasta real não foi tocada
         _shutil_fim = __import__("shutil")
         _shutil_fim.rmtree(globals()["DIR_RECIBOS"], ignore_errors=True)

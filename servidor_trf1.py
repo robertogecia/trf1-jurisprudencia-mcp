@@ -52,7 +52,7 @@ import urllib.parse
 from datetime import date, datetime, timezone
 from typing import Any
 
-VERSAO = "1.5.5"
+VERSAO = "1.6.0"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -1661,11 +1661,12 @@ def _arq_recibo(ident: str) -> str:
 
 
 def _texto_de_custodia(d: dict) -> str:
-    partes = [x for x in (d.get("ementa"), d.get("decisao"), d.get("inteiro_teor_texto") or d.get("inteiro_teor_embutido")) if x]
+    # v1.6.0: sem o destaque «» do portal (ele marca o termo pesquisado na lista; recibo de busca e de decisão têm de ter o MESMO texto)
+    partes = [x for x in (_sem_destaque(d.get("ementa") or ""), _sem_destaque(d.get("decisao") or ""), d.get("inteiro_teor_texto") or d.get("inteiro_teor_embutido")) if x]
     return "\n\n".join(partes)
 
 
-def _campos_de_custodia(d: dict) -> dict:
+def _campos_de_custodia(d: dict, origem: str = "decisao") -> dict:
     """Formato compartilhado com os recibos do TJRO/STJ/TJSE/TCE-RO: `id_documento`, `nr_processo`,
     `texto`. Os trechos que NÃO são palavra do tribunal (transcrição de outro julgado, faixa
     divergente) vão EM BRUTO, recortados do próprio `texto`, para quem lê aplicar a sua
@@ -1679,6 +1680,7 @@ def _campos_de_custodia(d: dict) -> dict:
         div = faixa_divergente(tn, 0)
         divergente = it[_bruto(it, tn, div[0]):] if div else ""
     return {
+        "origem": origem,   # v1.6.0: "decisao" (obter_decisao/verificar_citacao leram o número inteiro) ou "busca" (só o que a lista trouxe)
         "id_documento": str(d.get("id") or ""),
         "nr_processo": d.get("numero_digitos") or _so_digitos(d.get("numero") or ""),
         "numero": d.get("numero") or "",
@@ -1690,7 +1692,7 @@ def _campos_de_custodia(d: dict) -> dict:
         "orgao": d.get("orgao_fecho") or d.get("orgao") or "", "orgao_fonte": _orgao_fonte(d),
         "relator": d.get("relator") or "", "relator_texto": d.get("relator_acordao_texto") or d.get("relator_texto") or "",
         "url": d.get("link_inteiro_teor") or "",
-        "texto": texto, "ementa": d.get("ementa") or "", "dispositivo": d.get("decisao") or "",
+        "texto": texto, "ementa": _sem_destaque(d.get("ementa") or ""), "dispositivo": _sem_destaque(d.get("decisao") or ""),
         "inteiro_teor_incluido": bool(it),
         "inteiro_teor": it,  # campo próprio: a atribuição roda sobre o MESMO texto que o portal deu (red team 22/09, 5)
         "trechos_transcritos": transcritos, "trecho_divergente": divergente, "trechos_obiter": _trechos_obiter(it) if it else [],
@@ -1702,7 +1704,8 @@ def _campos_de_custodia(d: dict) -> dict:
 
 
 def gravar_recibo(d: dict) -> str:
-    """Grava o recibo (0600, escrita atômica). Falha é silenciosa: recibo é conferência extra,
+    """Grava o recibo de DECISÃO (0600, escrita atômica; `origem: "decisao"`): vem de obter_decisao_trf1 ou da verificação, que leram o
+    número inteiro no portal. SOBRESCREVE e promove o recibo de busca do mesmo id. Falha é silenciosa: recibo é conferência extra,
     nunca condição da resposta. Devolve o caminho ou ''."""
     try:
         if not d.get("id") or not _texto_de_custodia(d):
@@ -1710,15 +1713,123 @@ def gravar_recibo(d: dict) -> str:
         os.makedirs(DIR_RECIBOS, mode=0o700, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(DIR_RECIBOS, 0o700)
-        rec = _campos_de_custodia(d)
+        rec = _campos_de_custodia(d, "decisao")
         caminho = _arq_recibo(rec["id_documento"])
-        tmp = f"{caminho}.{os.getpid()}.tmp"
-        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
-            json.dump(rec, f, ensure_ascii=False)
-        os.replace(tmp, caminho)
+        _escrever_json_atomico(caminho, rec)
+        _desindexar_busca(DIR_RECIBOS, [rec["id_documento"]])
         return caminho
     except Exception:
         return ""
+
+
+def _escrever_json_atomico(caminho: str, obj: Any) -> int:
+    """Escreve JSON em arquivo 0600 por arquivo temporário + rename; devolve os bytes escritos."""
+    tmp = f"{caminho}.{os.getpid()}.tmp"
+    bruto = json.dumps(obj, ensure_ascii=False)
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+        f.write(bruto)
+    os.replace(tmp, caminho)
+    return len(bruto.encode("utf-8"))
+
+
+# --- Recibo gravado pela própria busca (porte do TJRO v1.31.0, H01) -------------------------------------------- #
+# A lista da busca já traz ementa e dispositivo (e, no colegiado, o inteiro teor embutido) INTEGRAIS: guardá-los evita reabrir o número
+# só para citar. Salvaguardas: (a) a busca NUNCA sobrescreve recibo existente; o de decisão promove o de busca; (b) acima de
+# TRF1_MCP_RECIBOS_BUSCA_MAX_MB (padrão 300) saem os recibos de busca MAIS ANTIGOS, nunca os de decisão; (c) na TNU o recibo de busca NÃO
+# tem o inteiro teor (a lista não o traz) e quem verifica citação vai ao portal; (d) o recibo de busca não prova que o processo esteja completo.
+_INDICE_BUSCA = ".busca-indice.json"   # {id: [bytes, instante_ms]} dos recibos de origem "busca"; mesmo nome do TJRO
+RECIBOS_BUSCA_MAX_MB_PADRAO = 300
+
+
+def _recibos_busca_max_bytes() -> int:
+    try:
+        mb = float(os.environ.get("TRF1_MCP_RECIBOS_BUSCA_MAX_MB") or RECIBOS_BUSCA_MAX_MB_PADRAO)
+    except ValueError:
+        mb = RECIBOS_BUSCA_MAX_MB_PADRAO
+    return int(max(10, mb or RECIBOS_BUSCA_MAX_MB_PADRAO) * 1024 * 1024)
+
+
+def _ler_indice_busca(pasta: str) -> dict:
+    try:
+        with open(os.path.join(pasta, _INDICE_BUSCA), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _gravar_indice_busca(pasta: str, idx: dict) -> None:
+    _escrever_json_atomico(os.path.join(pasta, _INDICE_BUSCA), idx)
+
+
+def _desindexar_busca(pasta: str, ids: list[str]) -> None:
+    """Recibo de decisão promove o de busca: o id sai do índice de poda (e nunca mais é podado)."""
+    with contextlib.suppress(Exception):
+        idx = _ler_indice_busca(pasta)
+        if any(i in idx for i in ids):
+            for i in ids:
+                idx.pop(i, None)
+            _gravar_indice_busca(pasta, idx)
+
+
+def _podar_recibos_de_busca(pasta: str | None = None, max_bytes: int | None = None) -> int:
+    """Acima do teto saem os recibos de BUSCA mais antigos, até 80% do teto; nunca os de decisão (nem o arquivo que, apesar do índice,
+    não traga `origem: "busca"`). Devolve quantos removeu."""
+    removidos = 0
+    try:
+        pasta = pasta or DIR_RECIBOS
+        teto = max_bytes if max_bytes is not None else _recibos_busca_max_bytes()
+        idx = _ler_indice_busca(pasta)
+        total = sum(int((v or [0])[0] or 0) for v in idx.values())
+        if total <= teto:
+            return 0
+        for ident, v in sorted(idx.items(), key=lambda kv: (kv[1] or [0, 0])[1] or 0):
+            if total <= teto * 0.8:
+                break
+            cam = os.path.join(pasta, re.sub(r"[^A-Za-z0-9]", "", str(ident)) + ".json")
+            try:
+                with open(cam, encoding="utf-8") as f:
+                    r = json.load(f)
+                if isinstance(r, dict) and r.get("origem") == "busca":
+                    os.unlink(cam)
+                    removidos += 1
+            except Exception:
+                pass
+            total -= int((v or [0])[0] or 0)
+            idx.pop(ident, None)
+        _gravar_indice_busca(pasta, idx)
+    except Exception:
+        pass
+    return removidos
+
+
+def gravar_recibos_da_busca(docs: list[dict], pasta: str | None = None) -> int:
+    """Guarda, como recibo `origem: "busca"`, os documentos da página que a busca trouxe. NUNCA sobrescreve um recibo existente (de busca ou
+    de decisão). Tira o destaque «» do portal (o texto fica igual ao que obter_decisao grava). Falha é silenciosa. Devolve quantos gravou."""
+    n = 0
+    try:
+        pasta = pasta or DIR_RECIBOS
+        os.makedirs(pasta, mode=0o700, exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.chmod(pasta, 0o700)
+        novos: dict[str, list] = {}
+        for d in docs or []:
+            if not d.get("id") or not _texto_de_custodia(d):
+                continue
+            alvo = os.path.join(pasta, re.sub(r"[^A-Za-z0-9]", "", str(d["id"])) + ".json")
+            if os.path.exists(alvo) or os.path.exists(alvo + ".inconsistente"):
+                continue
+            rec = _campos_de_custodia(d, "busca")
+            novos[rec["id_documento"]] = [_escrever_json_atomico(alvo, rec), int(time.time() * 1000)]
+            n += 1
+        if n:
+            idx = _ler_indice_busca(pasta)
+            idx.update(novos)
+            _gravar_indice_busca(pasta, idx)
+            _podar_recibos_de_busca(pasta)
+    except Exception:
+        pass
+    return n
 
 
 def ler_recibo(ident: str) -> dict | None:
@@ -1766,7 +1877,7 @@ def _doc_de_recibo(rec: dict) -> dict:
             "inteiro_teor_texto": rec.get("inteiro_teor") or "",
             "link_inteiro_teor": rec.get("url") or "", "link_tipo": "tnu" if "eproctnu" in (rec.get("url") or "") else
             "arquivo" if "arquivo.trf1" in (rec.get("url") or "") else "pje" if "pje" in (rec.get("url") or "") else "",
-            "campos": {}, "recibo": _arq_recibo(rec["id_documento"])}
+            "campos": {}, "recibo": _arq_recibo(rec["id_documento"]), "origem_recibo": rec.get("origem") or "decisao"}
 
 
 # --- Citação e formatação ---------------------------------------------------- #
@@ -2152,7 +2263,28 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
     return "\n".join(linhas)
 
 
-def _format_decisao(docs: list[dict], numero: str, total: int) -> str:
+# --- Inteiro teor sem repetição (porte do TJRO v1.29.0, H04; só TNU) ----------------------------------------------- #
+# Na TNU o portal entrega a ementa e o dispositivo e o eproc entrega o inteiro teor, que traz a ementa e o acórdão de novo. Quando o texto do
+# portal está CONTIDO letra a letra no inteiro teor exibido (só espaços e o destaque «» são normalizados; nunca similaridade), ele vira um ponteiro.
+# Se o inteiro teor é cortado pelo orçamento e o trecho cai na parte não exibida, NÃO se substitui. Texto curto não vira ponteiro (seria maior).
+SEM_REPETICAO_MIN_CHARS = 150
+SEM_REPETICAO_ANCORA = 40
+
+
+def _compacto(t: str) -> str:
+    return _RE_ESPACOS_PY.sub(" ", _sem_destaque(t or "")).strip()
+
+
+def _ponteiro_contido(texto: str, it_exibido_compacto: str, rotulo: str) -> str:
+    """Ponteiro no lugar de `texto` se ele está contido, exato, no inteiro teor exibido; senão ''."""
+    c = _compacto(texto)
+    if len(c) < SEM_REPETICAO_MIN_CHARS or c not in it_exibido_compacto:
+        return ""
+    ptr = f"[{rotulo}: texto idêntico a trecho do inteiro teor abaixo ({len(c)} caracteres); começa em «{c[:SEM_REPETICAO_ANCORA]}…»]"
+    return ptr if len(ptr) < len(c) else ""   # só troca quando o ponteiro é menor que o texto
+
+
+def _format_decisao(docs: list[dict], numero: str, total: int, sem_repeticao: bool = True) -> str:
     if not docs:
         return (
             f"Nenhum documento publicado no portal do CJF/TRF1 sob o número {numero}. Confira o "
@@ -2168,7 +2300,15 @@ def _format_decisao(docs: list[dict], numero: str, total: int) -> str:
     for d in docs:
         it = d.get("inteiro_teor_texto") or d.get("inteiro_teor_embutido") or ""
         em = d.get("ementa") or "—"
-        cortado = len(em) > orcamento_por_doc or len(it) > orcamento_por_doc
+        # inteiro teor como será exibido (cortado no orçamento, se for o caso) e o que dele repete a ementa e o dispositivo do portal
+        it_cortado = len(it) > orcamento_por_doc
+        it_exibido = it[:orcamento_por_doc].rsplit(" ", 1)[0] if it_cortado else it
+        ptr_em = ptr_dec = ""
+        if sem_repeticao and d.get("inteiro_teor_texto"):
+            _ic = _compacto(it_exibido)
+            ptr_em = _ponteiro_contido(d.get("ementa") or "", _ic, "Ementa")
+            ptr_dec = _ponteiro_contido(d.get("decisao") or "", _ic, "Dispositivo")
+        cortado = (len(em) > orcamento_por_doc and not ptr_em) or it_cortado
         nivel = _nivel_verificacao(d, cortado=cortado)
         linhas.append(f"\n### {d.get('tipo') or 'Documento'} · id {d['id']} · julgado em {d.get('data_fecho') or d.get('data_julgamento') or '?'}")
         linhas.append(f"Citação: {_citacao_com_link(d)} — verificação: {nivel}")
@@ -2188,13 +2328,15 @@ def _format_decisao(docs: list[dict], numero: str, total: int) -> str:
         _lf = _linha_fatos(d)
         if _lf:
             linhas.append(f"  {_lf}")
-        if len(em) > orcamento_por_doc:
+        if ptr_em:
+            em = ptr_em
+        elif len(em) > orcamento_por_doc:
             em = em[:orcamento_por_doc].rsplit(" ", 1)[0] + "… [CORTADO pelo orçamento de caracteres — o recibo em disco tem o texto inteiro]"
         linhas.append(f"\n**Ementa (integral, literal do portal):**\n{em}")
-        linhas.append(f"\n**Dispositivo (campo \"Decisão\", literal):**\n{d.get('decisao') or '— (não informado pelo portal)'}")
+        linhas.append(f"\n**Dispositivo (campo \"Decisão\", literal):**\n{ptr_dec or d.get('decisao') or '— (não informado pelo portal)'}")
         if it:
-            if len(it) > orcamento_por_doc:
-                it = it[:orcamento_por_doc].rsplit(" ", 1)[0] + "… [CORTADO pelo orçamento de caracteres — o recibo em disco tem o texto inteiro; verificação = EM PARTE]"
+            if it_cortado:
+                it = it_exibido + "… [CORTADO pelo orçamento de caracteres — o recibo em disco tem o texto inteiro; verificação = EM PARTE]"
             linhas.append(f"\n**Inteiro teor (literal, {'eproc da TNU' if d.get('inteiro_teor_texto') else 'embutido no portal'}):**\n{it}")
         else:
             linhas.append(f"\n{_nota_inteiro_teor(d)}")
@@ -2215,6 +2357,65 @@ def _format_decisao(docs: list[dict], numero: str, total: int) -> str:
             "o voto resolveria. \"Inteiro teor lido\" só depois de abrir o PDF no navegador."
         )
     return "\n".join(linhas)
+
+
+# --- Modo triagem (porte do TJRO v1.33.0): ler barato para decidir se vale ler por inteiro ------------------------ #
+TRIAGEM_DISPOSITIVO_MAX = 300
+MODOS_DECISAO = ("completo", "triagem")
+
+
+def _format_triagem(docs: list[dict], numero: str, total: int) -> str:
+    """Um bloco por JULGAMENTO (mesma data): resultado declarado, votação, peças com id e link, citação, início do dispositivo, tese da ementa,
+    fatos do julgado (TNU) e sinais (Cita: …), SEM o texto da ementa nem do inteiro teor. Indício para escolher o que ler; para aspas vale o modo
+    completo ou verificar_citacao_trf1."""
+    if not docs:
+        return _format_decisao([], numero, total)
+    grupos: dict[str, list[dict]] = {}
+    for d in docs:
+        grupos.setdefault(d.get("data_fecho") or d.get("data_julgamento") or f"sem data (id {d['id']})", []).append(d)
+    ordenados = sorted(grupos.items(), key=lambda kv: _data_iso(kv[0]), reverse=True)
+    out = [f"**Triagem do número {docs[0].get('numero') or numero}** ({len(ordenados)} julgamento(s), {len(docs)} documento(s)"
+           + (f"; o portal informa {total}, mostrando os primeiros" if total > len(docs) else "")
+           + "). Modo triagem: resultado, tese, fatos e sinais, SEM a ementa nem o inteiro teor. Para ler, chame de novo sem `modo`; "
+           "para pôr trecho entre aspas, use o modo completo ou `verificar_citacao_trf1`. Indício para decidir o que ler, não citação."]
+    for data, ds in ordenados:
+        rep = next((x for x in ds if "acordao" in _fold(x.get("tipo") or "")), ds[0])
+        conj: set[str] = set()
+        emb = False
+        for x in ds:
+            c_, e_ = _resultado_com_embargos(x.get("decisao") or "", x.get("classe") or "")
+            conj |= c_
+            emb = emb or e_
+        res = _rotulo_documento(conj, emb)
+        orgao = rep.get("orgao_fecho") or rep.get("orgao") or "órgão não informado"
+        linhas = [f"### {data} · Rel. {rep.get('relator') or '—'} · {orgao} ({_orgao_fonte(rep).split(' — ')[0]}) · {rep.get('classe') or rep.get('tipo') or ''}".rstrip(" ·"),
+                  f"- Resultado declarado: {res} (lido do dispositivo)"]
+        _vot = _votacao_do_documento(rep)
+        if _vot:
+            linhas.append(f"- Votação declarada: {_vot}")
+        linhas.append("- Peças: " + " · ".join(
+            f"{x.get('tipo') or 'documento'} id {x['id']}" + (f" ({_link_documento_especifico(x)})" if _link_documento_especifico(x) else "") for x in ds))
+        cz = any(x.get("inteiro_teor_texto") or x.get("inteiro_teor_embutido") for x in ds)
+        linhas.append(f"- Citação: {_citacao_com_link(rep)} — verificação: {_nivel_verificacao(rep)}")
+        if rep.get("decisao"):
+            linhas.append(f"- Dispositivo (início, literal): «{_trecho_centrado(rep['decisao'], TRIAGEM_DISPOSITIVO_MAX)}»")
+        te = _tese_da_ementa(rep.get("ementa") or "")
+        if te:
+            linhas.append("- " + _linha_tese(te))
+        _lf = _linha_fatos(next((x for x in ds if x.get("inteiro_teor_texto")), rep))
+        if _lf:
+            linhas.append("- " + _lf)
+        for sl in _linhas_de_sinais(rep):
+            linhas.append(f"- {sl}")
+        if len(ds) > 1:
+            for av in _avisos_opostos(ds):
+                linhas.append(f"- {av}")
+        if not cz:
+            linhas.append("- Sem inteiro teor nesta base: o voto não é exposto pelo portal.")
+        out.append("\n".join(linhas))
+    for av in _avisos_entre_julgamentos(docs):
+        out.append(av)
+    return "\n\n".join(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -2512,7 +2713,8 @@ def _diagnostico_ritmo(agora: float | None = None) -> str:
         e = _ler_estado()
     janela = _ESCADA_JANELA_S[e["indice_janela"]]
     na_janela = len([t for t in (e.get("requisicoes") or []) if agora - t <= janela])
-    n_rec = len([f for f in os.listdir(DIR_RECIBOS) if f.endswith(".json")]) if os.path.isdir(DIR_RECIBOS) else 0
+    n_rec = len([f for f in os.listdir(DIR_RECIBOS) if f.endswith(".json") and not f.startswith(".")]) if os.path.isdir(DIR_RECIBOS) else 0
+    n_busca = len(_ler_indice_busca(DIR_RECIBOS)) if os.path.isdir(DIR_RECIBOS) else 0
     linhas = [
         f"**Controle de ritmo do MCP TRF1 (portal do CJF) — v{VERSAO}**",
         f"- Nível atual: {e['indice_janela'] + 1} de {len(_ESCADA_JANELA_S)} "
@@ -2525,7 +2727,7 @@ def _diagnostico_ritmo(agora: float | None = None) -> str:
             if agora < e["bloqueado_ate"] else "- Situação: liberado"
         ),
         f"- User-Agent: {'definido por TRF1_USER_AGENT' if os.environ.get('TRF1_USER_AGENT') else 'padrão (identificado)'}",
-        f"- Recibos gravados em {DIR_RECIBOS}: {n_rec}",
+        f"- Recibos gravados em {DIR_RECIBOS}: {n_rec}" + (f" ({n_busca} de busca, sujeitos ao teto de {_recibos_busca_max_bytes() // (1024 * 1024)} MB; os demais, de decisão)" if n_busca else ""),
     ]
     if _persistencia_indisponivel:
         linhas.insert(1, (
@@ -2564,6 +2766,165 @@ def _diagnostico_ritmo(agora: float | None = None) -> str:
     elif media >= 8:
         linhas.append("As recusas vieram após rajadas — preferir uma busca ampla a várias seguidas é o que mais ajuda.")
     return "\n".join(linhas)
+
+
+# --------------------------------------------------------------------------- #
+# Livro-razão de requisições e relatório de ritmo (porte do TJRO v1.28.0)       #
+# Cada requisição ao portal deixa UMA linha em ~/.trf1-jurisprudencia-ritmo.jsonl (0600, últimas 3.000):   #
+#   {"t": instante em ms, "impl": "py"|"node", "pid": n, "id": "honesta"|"personalizada", "op": "busca"|"decisao"|…,  #
+#    "res": "ok"|"bloqueio"|"desafio"|"http_NNN"|"timeout"|"rede"|"sessao"|"inesperada", "status": http|null, "durMs": n|null}  #
+# NUNCA texto de busca, parte, relator nem número de processo. A extensão Node escreve no MESMO arquivo e formato (campo `impl` as distingue). #
+# Com ele se mede a taxa de falha por faixa de intervalo e a maior rajada sem falha. O relatório recomenda; nada é alterado automaticamente. #
+# --------------------------------------------------------------------------- #
+_ARQUIVO_RITMO = os.environ.get("TRF1_MCP_ARQUIVO_RITMO") or os.path.join(os.path.expanduser("~"), ".trf1-jurisprudencia-ritmo.jsonl")
+_RITMO_MAX_LINHAS = 3000
+_RITMO_TAMANHO_PARA_RODAR = 700_000
+_RITMO_ATIVO = "--selftest" not in sys.argv   # sob o selftest o livro-razão fica desligado (teste nunca grava no arquivo real)
+RITMO_MIN_REQS_PARA_RECOMENDAR = 100
+_FAIXAS_S = [(0.0, 1.5, "< 1,5 s"), (1.5, 3.0, "1,5–3 s"), (3.0, 5.0, "3–5 s"), (5.0, 10.0, "5–10 s"), (10.0, 30.0, "10–30 s"), (30.0, float("inf"), "≥ 30 s")]
+_RE_OP_RITMO = re.compile(r"[a-z_]{1,24}")
+_RE_RES_RITMO = re.compile(r"(?:ok|bloqueio|desafio|timeout|rede|sessao|inesperada|http_\d{3})")
+
+
+def _pct(a: int, b: int) -> int:
+    return int(100 * a / b + 0.5) if b else 0
+
+
+def _fmt_s(x: float) -> str:
+    return (str(int(x)) if float(x).is_integer() else f"{x:.1f}".replace(".", ","))
+
+
+def _identidade_py() -> str:
+    return "personalizada" if os.environ.get("TRF1_USER_AGENT") else "honesta"
+
+
+def _ritmo_anotar(t_ms: float, op: str, res: str, status: int | None = None, dur_ms: float | None = None, arquivo: str | None = None) -> None:
+    """Acrescenta uma linha ao livro-razão. Nunca levanta; desligado sob o selftest, salvo `arquivo` explícito (teste)."""
+    if arquivo is None and not _RITMO_ATIVO:
+        return
+    arquivo = arquivo or _ARQUIVO_RITMO
+    try:
+        op = op if _RE_OP_RITMO.fullmatch(str(op or "")) else "?"
+        res = res if _RE_RES_RITMO.fullmatch(str(res or "")) else "inesperada"
+        linha = json.dumps({"t": int(round(t_ms)), "impl": "py", "pid": os.getpid(), "id": _identidade_py(), "op": op, "res": res,
+                            "status": status, "durMs": None if dur_ms is None else int(round(dur_ms))}, ensure_ascii=False)
+        fd = os.open(arquivo, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (linha + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+        if os.path.getsize(arquivo) > _RITMO_TAMANHO_PARA_RODAR:
+            with open(arquivo, encoding="utf-8") as f:
+                linhas = [x for x in f.read().split("\n") if x]
+            tmp = f"{arquivo}.{os.getpid()}.tmp"
+            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+                f.write("\n".join(linhas[-_RITMO_MAX_LINHAS:]) + "\n")
+            os.replace(tmp, arquivo)
+    except Exception:
+        pass   # o livro-razão nunca derruba uma consulta
+
+
+def _ritmo_ler(arquivo: str | None = None) -> list[dict]:
+    try:
+        with open(arquivo or _ARQUIVO_RITMO, encoding="utf-8") as f:
+            out = []
+            for linha in f.read().split("\n"):
+                if not linha:
+                    continue
+                try:
+                    d = json.loads(linha)
+                except Exception:
+                    continue
+                if isinstance(d, dict) and isinstance(d.get("t"), (int, float)) and not isinstance(d.get("t"), bool):
+                    out.append(d)
+        return sorted(out, key=lambda x: x["t"])
+    except Exception:
+        return []
+
+
+def _eh_falha_ritmo(r: dict) -> bool:
+    return str(r.get("res") or "") != "ok"
+
+
+def _analisar_ritmo(ritmo: list[dict], espacamento_min_ms: float = _ESPACAMENTO_MIN_S * 1000, janela_max: int = _JANELA_MAX_REQS,
+                    agora_ms: float | None = None) -> dict:
+    """Taxa de falha por faixa de intervalo desde a requisição anterior (qualquer origem), por desfecho e por origem, e a maior rajada em 60 s
+    SEM nenhuma falha dentro da janela. Falha é todo desfecho diferente de "ok"."""
+    agora_ms = time.time() * 1000 if agora_ms is None else agora_ms
+    n = len(ritmo)
+    faixas = [{"nome": nome, "de": a, "ate": b, "reqs": 0, "falhas": 0} for a, b, nome in _FAIXAS_S]
+    for k in range(1, n):
+        gap = (ritmo[k]["t"] - ritmo[k - 1]["t"]) / 1000
+        f = next(x for x in faixas if x["de"] <= gap < x["ate"])
+        f["reqs"] += 1
+        f["falhas"] += _eh_falha_ritmo(ritmo[k])
+    por_res: dict[str, int] = {}
+    por_impl: dict[str, int] = {}
+    for r in ritmo:
+        por_res[str(r.get("res") or "?")] = por_res.get(str(r.get("res") or "?"), 0) + 1
+        por_impl[str(r.get("impl") or "?")] = por_impl.get(str(r.get("impl") or "?"), 0) + 1
+    # maior janela de 60 s sem falha: duas pontas, com a falha mais recente como piso
+    max_rajada, ini, ultima_falha = 0, 0, -1
+    for k, r in enumerate(ritmo):
+        if _eh_falha_ritmo(r):
+            ultima_falha, ini = k, k + 1
+            continue
+        while ini < k and r["t"] - ritmo[ini]["t"] > 60_000:
+            ini += 1
+        max_rajada = max(max_rajada, k - max(ini, ultima_falha + 1) + 1)
+    inicio = ritmo[0]["t"] if n else None
+    acima = [f for f in faixas if f["de"] * 1000 >= espacamento_min_ms]
+    abaixo = [f for f in faixas if f["ate"] * 1000 <= espacamento_min_ms]
+    return {"n": n, "falhas": sum(1 for r in ritmo if _eh_falha_ritmo(r)), "inicio": inicio,
+            "diasCobertos": max(1, int((agora_ms - inicio) / 86_400_000 + 0.5)) if inicio else 0,
+            "faixas": faixas, "porDesfecho": por_res, "porOrigem": por_impl, "maxRajadaSemFalha": max_rajada,
+            "reqsAcima": sum(f["reqs"] for f in acima), "falhasAcima": sum(f["falhas"] for f in acima),
+            "reqsAbaixo": sum(f["reqs"] for f in abaixo), "falhasAbaixo": sum(f["falhas"] for f in abaixo),
+            "espacamentoMinMs": espacamento_min_ms, "janelaMax": janela_max}
+
+
+def _recomendacao_ritmo(a: dict) -> list[str]:
+    minimo = RITMO_MIN_REQS_PARA_RECOMENDAR
+    if a["n"] < minimo:
+        return [f"Dados insuficientes: {a['n']} requisições registradas (mínimo {minimo} para recomendar mudança).",
+                "**Manter os parâmetros atuais.** O livro-razão acumula a cada consulta; rode este relatório de novo depois."]
+    esp = _fmt_s(a["espacamentoMinMs"] / 1000)
+    out = []
+    if a["falhasAcima"] == 0 and a["reqsAcima"] >= minimo:
+        out.append(f"Com intervalo ≥ {esp} s: {a['reqsAcima']} requisições, **nenhuma falha**. O espaçamento mínimo atual está adequado.")
+    elif a["falhasAcima"] > 0:
+        out.append(f"Com intervalo ≥ {esp} s ainda houve {a['falhasAcima']} falha(s) em {a['reqsAcima']} requisições ({_pct(a['falhasAcima'], a['reqsAcima'])}%): "
+                   "o gatilho NÃO é só o espaçamento; veja o desfecho de cada falha (bloqueio, desafio, rede, timeout) e os incidentes do disjuntor.")
+    if a["falhasAbaixo"] > 0:
+        out.append(f"Com intervalo abaixo de {esp} s: {a['falhasAbaixo']} falha(s) em {a['reqsAbaixo']} requisições ({_pct(a['falhasAbaixo'], a['reqsAbaixo'])}%). Não reduzir o espaçamento.")
+    out.append(f"Maior rajada em 60 s SEM falha: {a['maxRajadaSemFalha']} requisições (teto configurado: {a['janelaMax']} por janela). "
+               "Decisão sobre qualquer parâmetro é humana; este relatório não altera nada.")
+    return out
+
+
+def _formatar_relatorio_ritmo(a: dict) -> str:
+    utc = lambda ms: time.strftime("%Y-%m-%d %H:%M", time.gmtime(ms / 1000))   # noqa: E731
+    L = ["**Relatório de ritmo do portal do CJF (livro-razão de requisições)**"]
+    L.append(f"- Livro-razão: {a['n']} requisições registradas" + (f" desde {utc(a['inicio'])} UTC ({a['diasCobertos']} dia(s))" if a["inicio"] else "")
+             + f"; falhas (desfecho diferente de ok): {a['falhas']}.")
+    L.append(f"- Parâmetros atuais: espaçamento mínimo {_fmt_s(a['espacamentoMinMs'] / 1000)} s; teto de {a['janelaMax']} requisições por janela.")
+    if a["n"]:
+        L.append("- Origem das linhas: " + ", ".join(f"{k} {v}" for k, v in sorted(a["porOrigem"].items())) + ".")
+        L.append("\n**Taxa de falha por intervalo desde a requisição anterior (qualquer origem, qualquer processo desta máquina):**")
+        L.append("| Intervalo | Requisições | Falhas | Taxa |")
+        L.append("|---|---|---|---|")
+        for f in a["faixas"]:
+            L.append(f"| {f['nome']} | {f['reqs']} | {f['falhas']} | {str(_pct(f['falhas'], f['reqs'])) + '%' if f['reqs'] else '—'} |")
+        L.append("\n**Por desfecho:** " + ", ".join(f"{k} {v}" for k, v in sorted(a["porDesfecho"].items(), key=lambda kv: (-kv[1], kv[0]))) + ".")
+    L.append("\n**Recomendação (a partir dos dados; nada é alterado automaticamente):**")
+    for r in _recomendacao_ritmo(a):
+        L.append(f"- {r}")
+    L.append("\n_Privacidade: o livro-razão guarda só horário, operação, origem e desfecho; nunca texto de busca, partes, relatores nem números de processo._")
+    return "\n".join(L)
+
+
+def _relatorio_de_ritmo(agora: float | None = None, arquivo: str | None = None) -> str:
+    return _formatar_relatorio_ritmo(_analisar_ritmo(_ritmo_ler(arquivo), agora_ms=None if agora is None else agora * 1000))
 
 
 # Cache de respostas idênticas (por processo): repetir a MESMA busca na mesma conversa
@@ -2684,6 +3045,7 @@ async def _requisitar(cli: "httpx.AsyncClient", metodo: str, url: str, operacao:
         raise PesquisaNaoRealizada(reserva["erro"])
     if reserva["esperar_s"] > 0:
         await asyncio.sleep(reserva["esperar_s"])
+    t0_ms = time.time() * 1000
     try:
         if metodo == "GET":
             r = await cli.get(url, headers=headers)
@@ -2693,7 +3055,9 @@ async def _requisitar(cli: "httpx.AsyncClient", metodo: str, url: str, operacao:
         # timeout e falha de rede NÃO armam o disjuntor (não são recusa do portal; o TJSE
         # pausava 30 min por timeout e a comparação de 22/09/2026 confirmou que aqui já
         # estava certo) — mas são pesquisa NÃO realizada, nunca "não localizado"
+        _ritmo_anotar(t0_ms, operacao, "timeout" if "timeout" in type(e).__name__.lower() else "rede", None, time.time() * 1000 - t0_ms)
         raise PesquisaNaoRealizada(f"falha de rede ao consultar o portal ({type(e).__name__}: {e}) — tente de novo em instantes")
+    dur_ms = time.time() * 1000 - t0_ms
     ctype = r.headers.get("content-type", "").lower()
     texto = r.text or ""
     # Só o ENVELOPE (fora dos CDATA): ementa que fale de "acesso bloqueado" ou "sessão
@@ -2708,16 +3072,22 @@ async def _requisitar(cli: "httpx.AsyncClient", metodo: str, url: str, operacao:
         except ValueError:
             espera_minima = 0.0
         tipo = "desafio" if eh_desafio else "bloqueio" if eh_bloqueio else "http"
+        _ritmo_anotar(t0_ms, operacao, tipo if tipo != "http" else f"http_{r.status_code}", r.status_code, dur_ms)
         _registrar_bloqueio_detectado(operacao=operacao, subir_escada=eh_bloqueio, espera_minima_s=espera_minima, tipo=tipo)
         raise PortalRecusou(_diagnosticar_resposta(r.status_code, ctype, texto, esperado))
     if _RE_SESSAO_EXPIRADA.search(envelope):
+        _ritmo_anotar(t0_ms, operacao, "sessao", r.status_code, dur_ms)
         raise SessaoInvalida(_diagnosticar_resposta(r.status_code, ctype, texto, esperado))
     if r.status_code >= 400:
+        _ritmo_anotar(t0_ms, operacao, f"http_{r.status_code}", r.status_code, dur_ms)
         raise PesquisaNaoRealizada(_diagnosticar_resposta(r.status_code, ctype, texto, esperado))
     if esperado == "xml" and "<partial-response" not in texto[:2000]:
+        _ritmo_anotar(t0_ms, operacao, "inesperada", r.status_code, dur_ms)
         raise PesquisaNaoRealizada(_diagnosticar_resposta(r.status_code, ctype, texto, "XML <partial-response>"))
     if esperado == "html" and "javax.faces.ViewState" not in texto:  # "qualquer": sem checagem
+        _ritmo_anotar(t0_ms, operacao, "inesperada", r.status_code, dur_ms)
         raise PesquisaNaoRealizada(_diagnosticar_resposta(r.status_code, ctype, texto, "a página do formulário"))
+    _ritmo_anotar(t0_ms, operacao, "ok", r.status_code, dur_ms)
     _registrar_sucesso()
     return texto
 
@@ -2983,7 +3353,7 @@ def _listar_recibos(pasta: str | None = None) -> list[dict]:
             if rec and rec.get("id_documento"):
                 rec = dict(rec)
                 for campo in ("id_documento", "nr_processo", "numero", "base", "tipo", "classe", "orgao", "orgao_fonte", "relator", "relator_texto",
-                              "data_julgamento", "obtido_em", "inteiro_teor", "ementa", "dispositivo"):
+                              "data_julgamento", "obtido_em", "inteiro_teor", "ementa", "dispositivo", "origem"):
                     v = rec.get(campo)
                     rec[campo] = v if isinstance(v, str) else ("" if v is None else str(v))
                 rec["_tn"] = norm(rec["inteiro_teor"] or rec["texto"])
@@ -3001,6 +3371,102 @@ def _trecho_em_volta(texto: str, tn: str, rx, largura: int = 160) -> str:
     # norm preserva o comprimento na maior parte dos casos; se não, recua para o início
     i = m.start() if len(tn) == len(base) else max(0, int(m.start() * len(base) / max(1, len(tn))))
     return re.sub(r"\s+", " ", base[max(0, i - largura):i + largura]).strip()
+
+
+# --- Consulta em linguagem natural: ranking BM25 sobre a ementa (porte do TJRO v1.37) -------------------------- #
+# O E de TODAS as palavras de um relato de fatos quase sempre dá zero (o TJRO mediu zero nas 40 consultas de teste). Com 3+ palavras e zero
+# no E, devolve os recibos com MAIS delas: BM25 (k1 1,2; b 0,75) sobre a ementa, por palavra e por par de palavras vizinhas (peso 1,5).
+# medido offline em 17/10/2026: 20 consultas de relato de fatos, escritas por mim a partir de ementas sorteadas dos 141 recibos locais; o julgado de origem
+# ficou no top 10 em 19 e no top 3 em 18 (amostra A: 9 e 8 de 10; amostra B: 10 e 10 de 10); o E de todas as palavras deu zero nas 20. Corpus pequeno e
+# consultas escritas por quem conhecia a ementa: é indício, não validação cega.
+RECIBOS_BM25_MEDIDA = "em 20 consultas de teste em linguagem natural, pôs o julgado certo no top 10 em 19 e no top 3 em 18; o E de todas as palavras deu zero nas 20"
+BM25_MIN_PALAVRAS = 3
+BM25_MIN_LETRAS = 4
+BM25_EMENTA_MAX = 6000
+BM25_K1, BM25_B, BM25_PESO_PAR = 1.2, 0.75, 1.5
+_STOP_BM25 = frozenset((
+    "para pela pelo pelos pelas como mais pois sobre entre sendo seja sejam este esta estes estas esse essa isso isto aquele aquela quando onde "
+    "qual quais cujo cuja cujos cujas assim ainda tambem porem contudo todavia entretanto portanto logo entao apenas mesmo mesma mesmos mesmas "
+    "outro outra outros outras cada todo toda todos todas nada tudo muito muita muitos muitas pouco pouca desde apos antes depois durante conforme "
+    "segundo mediante perante contra atraves acerca junto face nos nas dos das uma uns umas nesse nessa neste nesta deste desta desse dessa sido "
+    "foram sera serao seria seriam tendo haver havendo houve fica ficam ficou deve devem devendo pode podem podendo sem sob com ela ele seu sua "
+    "seus suas foi tem ser nao que por aos").split())
+_ROMANO_BM25 = re.compile(r"^[ivxlcdm]+$")
+_IDX_BM25: dict[str, dict] = {}
+
+
+def _dobra(t) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", str(t).lower()) if not unicodedata.combining(c))
+
+
+def _palavras_bm25(texto) -> list[str]:
+    """Palavras do texto, sem acento: BM25_MIN_LETRAS+ letras, só letras (sem algarismo), sem palavra de ligação e sem algarismo romano."""
+    out = []
+    for w in re.findall(r"[^\W_]+", str(texto or "").lower()):
+        f = _dobra(w)
+        if len(f) < BM25_MIN_LETRAS or not re.fullmatch(r"[a-z]+", f) or f in _STOP_BM25 or _ROMANO_BM25.match(f):
+            continue
+        out.append(f)
+    return out
+
+
+def _q6(x: float) -> int:
+    return int(math.floor(x * 1e6 + 0.5))
+
+
+def _doc_bm25(r: dict) -> dict:
+    k = f"{r.get('id_documento')}:{len(r.get('ementa') or '')}:{len(r.get('texto') or '')}"
+    v = _IDX_BM25.get(k)
+    if v is None:
+        if len(_IDX_BM25) > 20000:
+            _IDX_BM25.clear()
+        t = _palavras_bm25((r.get("ementa") or r.get("texto") or "")[:BM25_EMENTA_MAX])
+        tf: dict[str, int] = {}
+        tfb: dict[str, int] = {}
+        for w in t:
+            tf[w] = tf.get(w, 0) + 1
+        for i in range(len(t) - 1):
+            b = f"{t[i]}_{t[i + 1]}"
+            tfb[b] = tfb.get(b, 0) + 1
+        v = {"len": len(t), "tf": tf, "tfb": tfb}
+        _IDX_BM25[k] = v
+    return v
+
+
+def _rankear_por_consulta(consulta, recibos: list[dict], limite: int = 10) -> list[tuple[dict, int]]:
+    """[(recibo, nota×10^6)] dos `limite` melhores por BM25 (palavras e pares vizinhos da consulta sobre a ementa). Vazio se a consulta tem
+    menos de BM25_MIN_PALAVRAS palavras úteis ou nenhum recibo pontua. Desempate: data de julgamento mais recente, depois id."""
+    q = _palavras_bm25(consulta)
+    if len(q) < BM25_MIN_PALAVRAS or not recibos:
+        return []
+    qb = [f"{q[i]}_{q[i + 1]}" for i in range(len(q) - 1)]
+    docs = [(r, _doc_bm25(r)) for r in recibos]
+    n = len(docs)
+    avg = (sum(d["len"] for _, d in docs) / n) or 1
+    uq, uqb = list(dict.fromkeys(q)), list(dict.fromkeys(qb))
+    df = {w: sum(1 for _, d in docs if w in d["tf"]) for w in uq}
+    dfb = {w: sum(1 for _, d in docs if w in d["tfb"]) for w in uqb}
+
+    def peso(f: int, ln: int) -> float:
+        return (f * (BM25_K1 + 1)) / (f + BM25_K1 * (1 - BM25_B + (BM25_B * ln) / avg))
+
+    out = []
+    for r, d in docs:
+        sc = 0.0
+        for w in uq:
+            f = d["tf"].get(w)
+            if f:
+                sc += math.log(1 + (n - df[w] + 0.5) / (df[w] + 0.5)) * peso(f, d["len"])
+        for w in uqb:
+            f = d["tfb"].get(w)
+            if f:
+                sc += BM25_PESO_PAR * math.log(1 + (n - dfb[w] + 0.5) / (dfb[w] + 0.5)) * peso(f, d["len"])
+        if sc > 0:
+            out.append((r, _q6(sc)))
+    out.sort(key=lambda o: str(o[0].get("id_documento")))
+    out.sort(key=lambda o: _data_iso(o[0].get("data_julgamento") or ""), reverse=True)
+    out.sort(key=lambda o: -o[1])
+    return out[:limite]
 
 
 def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_processo: str = "", id_documento: str = "",
@@ -3053,15 +3519,25 @@ def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_pr
         achados.append((peso, _data_iso(r.get("data_julgamento") or ""), r))
     achados.sort(key=lambda x: x[1], reverse=True)
     achados.sort(key=lambda x: -x[0])
+    # E de todas as palavras deu zero com consulta em linguagem natural: devolve os que têm MAIS delas (ranking BM25 sobre a ementa), dizendo isso
+    ranqueado = False
+    if not achados and not gs and not dig and not id_doc and len(palavras) >= BM25_MIN_PALAVRAS and todos:
+        for r_, sc in _rankear_por_consulta(consulta, todos, lim):
+            achados.append((sc, _data_iso(r_.get("data_julgamento") or ""), r_))
+        ranqueado = bool(achados)
     filtro_txt = ", ".join(x for x in [
         (f"processo {_cnj(dig) if len(dig) == 20 else dig + '…'}" if dig else ""), (f"id {id_doc}" if id_doc else ""),
         (f"relator «{str(relator).strip()}»" if rel_n else ""), (f"base {b}" if b else "")] if x)
     termos_mostrados = ", ".join(palavras + [t for g in gs for t in g]) or "(sem termos)"
     linhas = [
-        f"**Recibos locais do TRF1/TNU — {len(achados)} de {total_geral} documento(s) já lidos nesta máquina atendem a «{termos_mostrados}»"
-        f"{(' em ' + filtro_txt) if filtro_txt else ''} · ZERO requisição ao portal**",
-        "⚠️ Isto NÃO é pesquisa no acervo do CJF: só olha o que obter_decisao_trf1 já trouxe para esta máquina. Zero aqui NUNCA é "
-        "\"não localizado\" — para isso, buscar_jurisprudencia_trf1. Recibo da base trf1 guarda ementa e dispositivo (sem voto); o inteiro teor só existe nos da TNU.",
+        (f"**Recibos locais do TRF1/TNU — nenhum dos {total_geral} documento(s) já lidos tem TODAS as palavras de «{termos_mostrados}»; abaixo, os "
+         f"{len(achados)} que têm MAIS delas (ranking BM25 sobre a ementa, palavras e pares vizinhos; {RECIBOS_BM25_MEDIDA}) · ZERO requisição ao portal**"
+         if ranqueado else
+         f"**Recibos locais do TRF1/TNU — {len(achados)} de {total_geral} documento(s) já lidos nesta máquina atendem a «{termos_mostrados}»"
+         f"{(' em ' + filtro_txt) if filtro_txt else ''} · ZERO requisição ao portal**"),
+        "⚠️ Isto NÃO é pesquisa no acervo do CJF: só olha o que a busca e obter_decisao_trf1 já trouxeram para esta máquina. Zero aqui NUNCA é "
+        "\"não localizado\" — para isso, buscar_jurisprudencia_trf1. Recibo da base trf1 guarda ementa e dispositivo (sem voto); o inteiro teor só existe nos da TNU "
+        "lidos por obter_decisao_trf1. Recibo de BUSCA guarda só o que a lista trouxe (na TNU, sem inteiro teor) e não prova que o processo esteja completo.",
         "",
     ]
     if not todos:
@@ -3078,7 +3554,8 @@ def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_pr
         if tre:
             linhas.append(f"   «…{tre}…»")
         cust = ("inteiro teor da TNU incluído" if r.get("inteiro_teor_incluido") else "só ementa/dispositivo (sem voto)")
-        linhas.append(f"   recibo lido do portal em {str(r.get('obtido_em') or '?')[:16].replace('T', ' ')} · {cust}")
+        orig = "da busca" if r.get("origem") == "busca" else "de decisão (obter_decisao_trf1)"
+        linhas.append(f"   recibo {orig}, lido do portal em {str(r.get('obtido_em') or '?')[:16].replace('T', ' ')} · {cust}")
     if len(achados) > lim:
         linhas.append(f"\n_(mais {len(achados) - lim} recibo(s) atendem; aumente `limite` até {RECIBOS_LIMITE_MAX} ou refine os termos)_")
     linhas.append("\nPara conferir uma frase antes das aspas: verificar_citacao_trf1(numero, trecho) — usa o recibo, 0 requisições. "
@@ -3093,9 +3570,10 @@ def _buscar_recibos(consulta, grupos, limite=10, pasta: str | None = None, nr_pr
 # --------------------------------------------------------------------------- #
 _ARQUIVO_ERROS = os.environ.get("TRF1_MCP_ARQUIVO_ERROS") or os.path.join(os.path.expanduser("~"), ".trf1-jurisprudencia-erros.jsonl")
 _MAX_LINHAS_ERROS, _MAX_BYTES_ERROS = 500, 400_000
-_VALORES_SEGUROS = {"tipo", "tipo_acordao", "fonte", "base", "tipo_data", "pagina", "por_pagina", "limite", "dias"}
+_VALORES_SEGUROS = {"tipo", "tipo_acordao", "fonte", "base", "tipo_data", "pagina", "por_pagina", "limite", "dias", "modo"}
 _LISTA_BRANCA = {"tipo": {"ACORDAO", "SUMULA", "ARGUICAO", "DECISAOMONO", "DECISAOPRES"}, "tipo_acordao": {"REPRESENTATIVO", "RELEVANTE"},
-                 "fonte": {"TRF1", "JEF1"}, "base": {"trf1", "tnu", "colegiado"}, "tipo_data": {"julgamento", "publicacao"}}
+                 "fonte": {"TRF1", "JEF1"}, "base": {"trf1", "tnu", "colegiado"}, "tipo_data": {"julgamento", "publicacao"},
+                 "modo": {"completo", "triagem"}}
 _VERSAO_SERVIDOR = f"python-{VERSAO}"
 _RE_MARC_PARCIAL = re.compile(r"\[PESQUISA (?:NÃO REALIZADA|INCOMPLETA)\b")
 
@@ -3510,6 +3988,7 @@ async def _buscar(consulta: str, tipo, fonte, grupos, relator, orgao_julgador, c
         return _carimbo_nao_realizada(str(e).strip().rstrip(".") + _dica_consulta_grande(e, consulta_montada, grupos))
     except Exception as e:  # inesperado: também é pesquisa não realizada
         return _carimbo_nao_realizada(f"erro inesperado ({type(e).__name__}: {e})")
+    gravar_recibos_da_busca(dados["docs"])   # v1.6.0 (porte do TJRO v1.31, H01): a lista já trouxe o texto; guardar evita reabrir o número só para citar
     meta = {"consulta_montada": consulta_montada, "tipos": tipos, "fontes": fontes, "pagina": pagina,
             "por_pagina": por_pagina, "filtros": avancados, "avisos": dados.get("avisos"), "base": base,
             "tipo_acordao": tipo_acordao_v}
@@ -3550,10 +4029,13 @@ async def _localizar_por_numero(numero: str, base: str, operacao: str, com_intei
     return resultado, docs
 
 
-async def _obter_decisao(numero: str, base: str = "trf1") -> str:
+async def _obter_decisao(numero: str, base: str = "trf1", modo: str = "completo") -> str:
     digitos = _so_digitos(numero)
     if len(digitos) < 7:
         return f"Número muito curto para localizar com segurança: {numero!r}."
+    modo = (modo or "completo").strip().lower()
+    if modo not in MODOS_DECISAO:
+        return _erro_de_parametro(f"modo inválido: {modo!r}; use {' ou '.join(repr(m) for m in MODOS_DECISAO)}")
     try:
         base = _validar_base(base)
         dados, docs = await _localizar_por_numero(numero, base, "decisao")
@@ -3567,7 +4049,8 @@ async def _obter_decisao(numero: str, base: str = "trf1") -> str:
     except Exception as e:
         return _carimbo_nao_realizada(f"erro inesperado ({type(e).__name__}: {e})")
     gravados = [c for c in (gravar_recibo(d) for d in docs) if c]
-    saida = _format_decisao(docs, _cnj(digitos) if len(digitos) == 20 else numero, dados["total"])
+    _num = _cnj(digitos) if len(digitos) == 20 else numero
+    saida = _format_triagem(docs, _num, dados["total"]) if modo == "triagem" else _format_decisao(docs, _num, dados["total"])
     if gravados:
         saida += (f"\nRecibo(s) gravado(s) em {DIR_RECIBOS} ({len(gravados)}): o lint da peticao-rg e o "
                   "revisor-adversarial conferem a ficha contra esse arquivo, sem nova requisição.")
@@ -3583,22 +4066,38 @@ async def _verificar_citacao(numero: str, trecho: str, base: str = "trf1") -> st
     if not (trecho or "").strip():
         return "Informe o trecho que pretende citar entre aspas."
     origem = "portal"
+    docs: list[dict] = []
+    dados: dict = {}
+    so_busca = False
     try:
         base = _validar_base(base)
         # recibo local primeiro (0 requisições): o que o portal entregou da última vez, com sha256
         recs = _recibos_do_processo(digitos, base)
+        # TNU: recibo sem inteiro teor (inclusive o de busca) não serve para conferir voto: vai ao portal, como se não houvesse recibo
         if recs and (base != "tnu" or all(r.get("inteiro_teor") for r in recs)):
             docs = [_doc_de_recibo(r) for r in recs]
             dados = {"avisos": [], "total": len(docs)}
             origem = "recibo local"
-        else:
+            # v1.6.0 (porte do TJRO v1.31): recibo gravado só pela BUSCA não prova que o processo esteja completo (a lista traz só os
+            # documentos que casaram). Se o trecho está nele, vale; se não está, a ausência NÃO se conclui: lê o número inteiro no portal.
+            if all(r.get("origem") == "busca" for r in recs):
+                _rot = BASES[base]["rotulo"]
+                if any(_verificar_trecho({"ementa": d_.get("ementa") or "", "dispositivo": d_.get("decisao") or "",
+                                          "inteiro teor": d_.get("inteiro_teor_texto") or ""}, trecho, tribunal=_rot)["valido"] for d_ in docs):
+                    origem = "recibo local (de busca; o processo pode ter outros documentos)"
+                else:
+                    docs, so_busca = [], True
+        if not docs:
             dados, docs = await _localizar_por_numero(numero, base, "verificacao")
+            origem = "portal"
             for d in docs:
                 gravar_recibo(d)
     except ValueError as e:
         return _erro_de_parametro(e)
     except PesquisaNaoRealizada as e:
-        return _carimbo_nao_realizada(e)
+        return _carimbo_nao_realizada(str(e).strip().rstrip(".") + (
+            ". Só há recibos de BUSCA para este número, e o trecho não está neles: isso não prova que esteja fora do processo, "
+            "porque a busca traz só os documentos que casaram" if so_busca else ""))
     except Exception as e:
         return _carimbo_nao_realizada(f"erro inesperado ({type(e).__name__}: {e})")
     if not docs:
@@ -3816,6 +4315,12 @@ try:
             declaram cada resultado. Antes de citar, use obter_decisao_trf1.
             Falha (ritmo, bloqueio, rede, portal) sai como [PESQUISA NÃO REALIZADA — motivo]: nunca
             é "não localizado"; erro de parâmetro sai como "Erro de parâmetro".
+
+        Efeito local: os documentos da página são gravados como RECIBOS de origem "busca" em ~/.trf1-jurisprudencia-recibos (ementa e dispositivo
+        integrais, sem o destaque «»; na TNU, SEM inteiro teor, que a lista não traz). Isso poupa reabrir o número só para citar, mas a busca nunca
+        sobrescreve um recibo que já exista, o recibo de busca não prova que o processo esteja completo (verificar_citacao_trf1 não conclui ausência
+        por ele e, na TNU, vai ao portal) e, acima de TRF1_MCP_RECIBOS_BUSCA_MAX_MB (padrão 300), os de busca mais antigos são removidos; os de
+        obter_decisao_trf1 nunca.
         """
         return com_avisos(await _buscar(consulta, tipo, fonte, grupos, relator, orgao_julgador, classe, origem, numero,
                                         ementa_decisao, referencia_legislativa, data_inicio, data_fim, tipo_data, pagina, por_pagina,
@@ -3823,7 +4328,7 @@ try:
 
     @mcp.tool()
     @_diario
-    async def obter_decisao_trf1(numero: str, base: str = "trf1") -> str:
+    async def obter_decisao_trf1(numero: str, base: str = "trf1", modo: str = "completo") -> str:
         """Traz TODOS os documentos publicados no portal do CJF sob um número de processo do TRF1/JEF1,
         com ementa e dispositivo INTEGRAIS e literais — é o que substitui o "inteiro teor" aqui.
         Na base "tnu" traz também o INTEIRO TEOR (relatório, voto, votantes) baixado do eproc da TNU
@@ -3841,9 +4346,18 @@ try:
         portal entregou + sha256): é contra ele que o lint da peticao-rg e o revisor-adversarial
         conferem a ficha depois, e verificar_citacao_trf1 o usa sem gastar requisição.
 
+        Na TNU, quando a ementa ou o dispositivo do portal estão CONTIDOS letra a letra no inteiro teor exibido (só espaços e o destaque «» são
+        normalizados), o texto não é repetido: no lugar vai "texto idêntico a trecho do inteiro teor abaixo", com o começo do trecho. Se o inteiro teor
+        é cortado pelo orçamento e o trecho cai na parte não exibida, o texto sai por inteiro. O recibo em disco guarda sempre o texto completo.
+
         Args:
             numero: Número do processo (CNJ), com ou sem pontuação.
             base: "trf1" (padrão), "tnu" ou "colegiado" — a mesma em que o documento foi achado.
+            modo: "completo" (padrão) ou "triagem". A triagem é a leitura barata para decidir se vale ler o julgado por inteiro: UM bloco por
+                julgamento (mesma data) com o resultado declarado no dispositivo, a votação declarada, as peças com id e link, a citação, o início
+                do dispositivo, a TESE DA EMENTA, os FATOS DO JULGADO (TNU, trecho literal) e os sinais (Cita: Súmula/Tema/IRDR…), SEM a ementa
+                nem o inteiro teor (nos recibos locais medidos: 13% do tamanho do modo completo nos acórdãos da TNU com inteiro teor e 27% na base trf1). É indício para escolher o que ler: para
+                pôr trecho entre aspas use o modo completo ou verificar_citacao_trf1. Os recibos são gravados nos dois modos.
 
         Returns:
             Cabeçalho com a contagem de documentos sob o número; para cada um, citação pronta
@@ -3853,7 +4367,7 @@ try:
             integral, inteiro teor (TNU) e a nota de inteiro teor; no fim, o que preencher na ficha.
             Saída limitada a ~50 mil caracteres. Falha sai como [PESQUISA NÃO REALIZADA — motivo].
         """
-        return com_avisos(await _obter_decisao(numero, base))
+        return com_avisos(await _obter_decisao(numero, base, modo))
 
     @mcp.tool()
     @_diario
@@ -3931,14 +4445,20 @@ try:
         Serve para reencontrar o que já foi lido (ementa, dispositivo e, na TNU, o inteiro teor) sem gastar requisição
         nem cota do portal: por palavras (`consulta`, todas devem aparecer), por sinônimos (`grupos`: cada grupo é OU,
         os grupos se somam em E; `$` no fim = radical), por processo (`nr_processo`, número ou início dele), por `id_documento`,
-        por `relator` ou por `base` ("trf1", "tnu", "colegiado"). Ordena por relevância.
+        por `relator` ou por `base` ("trf1", "tnu", "colegiado"). Ordena por relevância. Os recibos vêm de obter_decisao_trf1 (origem "decisão")
+        e da própria buscar_jurisprudencia_trf1 (origem "busca": só o que a lista trouxe, na TNU sem inteiro teor).
+
+        Consulta em linguagem natural: com 3 ou mais palavras e NENHUM recibo com todas elas (o E de todas as palavras de um relato de fatos quase
+        sempre dá zero), devolve os recibos com MAIS delas, por ranking BM25 sobre a ementa (palavras e pares de palavras vizinhas), e avisa que mudou
+        de modo. Em 20 consultas de teste o julgado certo ficou no top 10 em 19 e no top 3 em 18 (corpus pequeno, consultas escritas por quem conhecia a
+        ementa: indício). Não vale com `grupos`, `nr_processo` nem `id_documento`.
 
         NÃO é pesquisa no acervo do CJF: zero resultado aqui NUNCA é "não localizado" — para isso, buscar_jurisprudencia_trf1.
         Recibo editado à mão (sha256 não confere) é posto de lado e não aparece.
 
         Returns:
-            Por recibo: tipo, órgão (e de onde veio), data, relator, número, id, votação declarada, trecho em volta do termo e
-            a data em que o portal entregou o texto. Falha de parâmetro sai como "BUSCA LOCAL NÃO REALIZADA".
+            Por recibo: tipo, órgão (e de onde veio), data, relator, número, id, votação declarada, trecho em volta do termo, a origem do
+            recibo (busca ou decisão) e a data em que o portal entregou o texto. Falha de parâmetro sai como "BUSCA LOCAL NÃO REALIZADA".
         """
         try:
             return com_avisos(_buscar_recibos(consulta, grupos, limite, None, nr_processo, id_documento, relator, base))
@@ -3967,15 +4487,24 @@ try:
             return com_avisos(_carimbo_nao_realizada(f"diagnóstico de erros falhou ({type(e).__name__}: {e})"))
 
     @mcp.tool()
-    async def diagnostico_ritmo_trf1() -> str:
+    async def diagnostico_ritmo_trf1(relatorio: bool = False) -> str:
         """Mostra por que as buscas do TRF1 podem estar falhando.
 
         Relata o nível atual do limite de ritmo, o orçamento consumido, se há bloqueio em curso
         (e quanto falta para liberar) e o histórico de bloqueios com o contexto de cada um.
         USE ISTO antes de concluir que "o portal está fora do ar". Não faz nenhuma requisição.
+
+        Com `relatorio=true` acrescenta o relatório do LIVRO-RAZÃO de requisições (~/.trf1-jurisprudencia-ritmo.jsonl, últimas 3.000
+        linhas, compartilhado com a extensão Node): taxa de falha por faixa de intervalo entre requisições, contagem por desfecho (ok, bloqueio,
+        desafio, http_NNN, timeout, rede) e por origem (py/node), maior rajada em 60 s sem falha e uma recomendação. O livro-razão guarda só
+        horário, operação, origem e desfecho, nunca texto de busca, parte, relator nem número de processo. A recomendação NÃO altera parâmetro
+        nenhum e, com menos de 100 requisições registradas, manda manter o ritmo atual.
+
+        Args:
+            relatorio: true para incluir o relatório do livro-razão.
         """
         try:
-            return com_avisos(_diagnostico_ritmo())
+            return com_avisos(_diagnostico_ritmo() + ("\n\n" + _relatorio_de_ritmo() if relatorio else ""))
         except Exception as e:  # diagnóstico nunca sai como traceback
             return com_avisos(_carimbo_nao_realizada(f"diagnóstico falhou ({type(e).__name__}: {e})"))
 
@@ -4000,6 +4529,9 @@ if __name__ == "__main__":
 
         base = os.path.dirname(os.path.abspath(__file__))
         fx = os.path.join(base, "fixtures")
+        # o selftest NUNCA toca a pasta real de recibos (v1.6.0: a busca grava recibo, e vários testes chamam _buscar/_obter_decisao com portal simulado)
+        _recibos_reais = globals()["DIR_RECIBOS"]
+        globals()["DIR_RECIBOS"] = _tempfile.mkdtemp(prefix="trf1-selftest-recibos-")
 
         def _ler(nome: str) -> str:
             with open(os.path.join(fx, nome), encoding="utf-8") as f:
@@ -4877,6 +5409,333 @@ if __name__ == "__main__":
         _t1 = _tese_da_ementa(_tese_pt(_TESE_MAX - 1)); _t2 = _tese_da_ementa(_tese_pt(_TESE_MAX)); _t3 = _tese_da_ementa(_tese_pt(_TESE_MAX - 2))
         assert len(_t1["texto"]) == _TESE_MAX and _t1["texto"].endswith("a.") and not _t1["completa"], len(_t1["texto"])   # ponto em teto-1: o Node (lastIndexOf) corta nele; o 1.5.4 caía em "Frase um."
         assert _t2["texto"] == "Frase um." and len(_t3["texto"]) == _TESE_MAX - 1, (_t2["texto"][:20], len(_t3["texto"]))   # ponto em teto: fica de fora nos dois
+        # ====================== v1.6.0 (porte do TJRO v1.28, v1.31, v1.33, v1.37, v1.29) ======================
+        _dr0 = globals()["DIR_RECIBOS"]
+        # --- 1) recibo gravado pela própria busca ---
+        with _tempfile.TemporaryDirectory() as _tmp:
+            globals()["DIR_RECIBOS"] = _tmp
+            try:
+                _CHAVES_ANTIGAS = {"id_documento", "nr_processo", "numero", "tribunal", "base", "tipo", "classe", "qualificacao", "data_julgamento",
+                                   "data_publicacao", "orgao", "orgao_fonte", "relator", "relator_texto", "url", "texto", "ementa", "dispositivo",
+                                   "inteiro_teor_incluido", "inteiro_teor", "trechos_transcritos", "trecho_divergente", "trechos_obiter",
+                                   "normalizacao", "sha256", "versao_servidor", "obtido_em"}
+                assert set(_campos_de_custodia(d0)) == _CHAVES_ANTIGAS | {"origem"}, set(_campos_de_custodia(d0)) ^ (_CHAVES_ANTIGAS | {"origem"})   # o lint continua lendo: só se ACRESCENTA `origem`
+                assert _campos_de_custodia(d0)["origem"] == "decisao" and _campos_de_custodia(d0, "busca")["origem"] == "busca"
+                _db = [dict(x, ementa=("«dano» " + x["ementa"]) if k == 0 else x["ementa"]) for k, x in enumerate(docs[:3])]
+                assert gravar_recibos_da_busca(_db) == 3
+                _rb = ler_recibo(_db[0]["id"])
+                assert _rb["origem"] == "busca" and "«" not in _rb["texto"] and "«" not in _rb["ementa"] and not _rb["inteiro_teor_incluido"], _rb["origem"]
+                assert (os.stat(_arq_recibo(_db[0]["id"])).st_mode & 0o777) == 0o600
+                _idx = _ler_indice_busca(_tmp)
+                assert set(_idx) == {x["id"] for x in _db} and all(v[0] > 100 and v[1] > 10**12 for v in _idx.values()), _idx
+                # (a) a busca NUNCA sobrescreve; o recibo de decisão sobrescreve e promove
+                _h0 = hashlib.sha256(open(_arq_recibo(_db[0]["id"]), "rb").read()).hexdigest()
+                assert gravar_recibos_da_busca([dict(_db[0], ementa="TEXTO NOVO diferente")]) == 0
+                assert hashlib.sha256(open(_arq_recibo(_db[0]["id"]), "rb").read()).hexdigest() == _h0
+                assert gravar_recibo(dict(docs[0], ementa=docs[0]["ementa"] + " (relida)"))
+                _rd0 = ler_recibo(docs[0]["id"])
+                assert _rd0["origem"] == "decisao" and _rd0["ementa"].endswith("(relida)") and docs[0]["id"] not in _ler_indice_busca(_tmp)
+                assert gravar_recibos_da_busca([dict(docs[0], ementa="de novo pela busca")]) == 0 and ler_recibo(docs[0]["id"])["origem"] == "decisao"
+                # mesmo texto: busca e decisão guardam o MESMO `texto` (sem o destaque «»)
+                assert _texto_de_custodia(_db[0]) == _texto_de_custodia(dict(docs[0], ementa="dano " + docs[0]["ementa"])) and ler_recibo(_db[1]["id"])["texto"] == _texto_de_custodia(docs[1])
+                # recibo antigo (sem `origem`) conta como decisão
+                _doc_antigo = _doc_de_recibo({k: v for k, v in _rd0.items() if k != "origem"})
+                assert _doc_antigo["origem_recibo"] == "decisao"
+                # (e) buscar_recibos diz a origem de cada recibo
+                _brb = _buscar_recibos("", [["dano", "apelação", "recurso", "sentença", "turma", "relida"]], 30)
+                assert "recibo da busca" in _brb and "recibo de decisão" in _brb, _brb[-700:]
+                # (b) poda: acima do teto saem os de busca mais antigos; nunca os de decisão
+                with _tempfile.TemporaryDirectory() as _tp:
+                    globals()["DIR_RECIBOS"] = _tp
+                    _ds = [dict(docs[k], id="P%d" % k) for k in range(5)]
+                    assert gravar_recibos_da_busca(_ds) == 5
+                    _ix = _ler_indice_busca(_tp)
+                    for k in range(5):
+                        _ix["P%d" % k][1] = 1_000 + k   # P0 o mais antigo
+                    assert gravar_recibo(dict(docs[5], id="Z9"))
+                    _ix["Z9"] = [100, 1]   # a mais antiga de todas, mas é recibo de decisão: não pode sair
+                    _gravar_indice_busca(_tp, _ix)
+                    _tot = sum(v[0] for v in _ix.values())
+                    assert _podar_recibos_de_busca(_tp, max_bytes=_tot * 10) == 0
+                    _n = _podar_recibos_de_busca(_tp, max_bytes=int(_tot * 0.5))
+                    assert _n >= 2 and not os.path.exists(_arq_recibo("P0")) and not os.path.exists(_arq_recibo("P1")) and os.path.exists(_arq_recibo("P4")), _n
+                    assert os.path.exists(_arq_recibo("Z9")) and ler_recibo("Z9")["origem"] == "decisao" and "Z9" not in _ler_indice_busca(_tp)
+                    globals()["DIR_RECIBOS"] = _tmp
+                _mb0 = os.environ.pop("TRF1_MCP_RECIBOS_BUSCA_MAX_MB", None)
+                assert _recibos_busca_max_bytes() == 300 * 1024 * 1024
+                os.environ["TRF1_MCP_RECIBOS_BUSCA_MAX_MB"] = "500"
+                assert _recibos_busca_max_bytes() == 500 * 1024 * 1024
+                os.environ["TRF1_MCP_RECIBOS_BUSCA_MAX_MB"] = "abc"
+                assert _recibos_busca_max_bytes() == 300 * 1024 * 1024
+                os.environ.pop("TRF1_MCP_RECIBOS_BUSCA_MAX_MB")
+                if _mb0 is not None:
+                    os.environ["TRF1_MCP_RECIBOS_BUSCA_MAX_MB"] = _mb0
+            finally:
+                globals()["DIR_RECIBOS"] = _dr0
+        # (c) verificar_citacao com recibo de busca
+        _chamadas: list = []
+        _docs_stub: list = []
+        async def _loc_stub(numero, base, operacao, com_inteiro_teor=True):
+            _chamadas.append((numero, base))
+            return {"total": len(_docs_stub), "docs": _docs_stub, "avisos": []}, _docs_stub
+        _loc_orig = _localizar_por_numero
+        with _tempfile.TemporaryDirectory() as _tmp:
+            globals()["DIR_RECIBOS"] = _tmp
+            globals()["_localizar_por_numero"] = _loc_stub
+            try:
+                # TNU: o recibo de busca NÃO tem inteiro teor → vai ao portal, nunca conclui ❌ por falta de texto
+                _tnu_busca = dict(docs_tnu[0])
+                assert gravar_recibos_da_busca([_tnu_busca]) == 1 and not ler_recibo(_tnu_busca["id"])["inteiro_teor"]
+                _docs_stub = [d_tnu]
+                _trecho_tnu = "A Turma Nacional de Uniformização decidiu, por unanimidade, CONHECER PARCIALMENTE do recurso"
+                _vt = asyncio.run(_verificar_citacao(_tnu_busca["numero"], _trecho_tnu, "tnu"))
+                assert len(_chamadas) == 1 and "fonte: portal" in _vt and "✅" in _vt, (_chamadas, _vt[:300])
+                assert ler_recibo(d_tnu["id"])["origem"] == "decisao" and ler_recibo(d_tnu["id"])["inteiro_teor_incluido"]   # o portal promoveu o recibo
+                _vt2 = asyncio.run(_verificar_citacao(_tnu_busca["numero"], _trecho_tnu, "tnu"))
+                assert len(_chamadas) == 1 and "fonte: recibo local" in _vt2   # agora há recibo com inteiro teor: 0 requisições
+                # trf1: o recibo de busca vale quando o trecho está nele (0 requisições)
+                _chamadas.clear()
+                _frase = " ".join((d0["ementa"] or "").split()[:8])
+                assert gravar_recibos_da_busca([d0]) == 1
+                _vb = asyncio.run(_verificar_citacao(d0["numero"], _frase, "trf1"))
+                assert not _chamadas and "recibo local (de busca; o processo pode ter outros documentos)" in _vb and "✅" in _vb, _vb[:300]
+                # trf1: trecho que NÃO está no recibo de busca → ausência não se conclui; lê o número inteiro no portal
+                _outro = dict(d0, id="888001", tipo="Acórdão", ementa="Ementa de outro documento do mesmo número com a expressão peculiar xyzzy plugh quux corge", decisao="")
+                _docs_stub = [d0, _outro]
+                _vb2 = asyncio.run(_verificar_citacao(d0["numero"], "a expressão peculiar xyzzy plugh quux corge", "trf1"))
+                assert len(_chamadas) == 1 and "fonte: portal" in _vb2 and "✅ VÁLIDO" in _vb2 and "888001" in _vb2, _vb2[:400]
+                assert ler_recibo("888001")["origem"] == "decisao"
+                # trf1 com recibo de DECISÃO: ausência vale (comportamento anterior), sem portal
+                _chamadas.clear()
+                _vd = asyncio.run(_verificar_citacao(d0["numero"], "frase que certamente não consta de nenhum documento deste processo", "trf1"))
+                assert not _chamadas and "❌ NÃO ENCONTRADO" in _vd and "fonte: recibo local" in _vd, _vd[:300]
+                # portal falha e só há recibo de busca: carimbo de pesquisa NÃO realizada que explica
+                with _tempfile.TemporaryDirectory() as _tf:
+                    globals()["DIR_RECIBOS"] = _tf
+                    assert gravar_recibos_da_busca([d0]) == 1
+                    async def _loc_falha(numero, base, operacao, com_inteiro_teor=True):
+                        raise PesquisaNaoRealizada("portal fora do ar")
+                    globals()["_localizar_por_numero"] = _loc_falha
+                    _vf = asyncio.run(_verificar_citacao(d0["numero"], "trecho inexistente em qualquer lugar do processo todo aqui", "trf1"))
+                    assert _vf.startswith("[PESQUISA NÃO REALIZADA") and "recibos de BUSCA" in _vf and "❌" not in _vf, _vf
+            finally:
+                globals()["_localizar_por_numero"] = _loc_orig
+                globals()["DIR_RECIBOS"] = _dr0
+        # a busca de fato grava (fluxo de _buscar com o portal simulado)
+        with _tempfile.TemporaryDirectory() as _tmp:
+            globals()["DIR_RECIBOS"] = _tmp
+            _cp_orig = _consultar_portal
+            async def _cp_stub(*a, **k):
+                return {"total": len(docs), "docs": docs, "avisos": []}
+            globals()["_consultar_portal"] = _cp_stub
+            try:
+                _sb = asyncio.run(_buscar("dano moral", None, None, None, None, None, None, None, None, None, None, None, None, "julgamento", 1, 30))
+                assert len(_ler_indice_busca(_tmp)) == len(docs) and ler_recibo(docs[0]["id"])["origem"] == "busca" and "documento(s)" in _sb
+            finally:
+                globals()["_consultar_portal"] = _cp_orig
+                globals()["DIR_RECIBOS"] = _dr0
+
+        # --- 2) buscar_recibos em linguagem natural (BM25 sobre a ementa) ---
+        assert _palavras_bm25("O INSS negou o benefício de 2024 art. XII por falta de prova") == ["inss", "negou", "beneficio", "falta", "prova"], _palavras_bm25("O INSS negou o benefício de 2024 art. XII por falta de prova")
+        assert _rankear_por_consulta("duas palavras", [{"id_documento": "1", "ementa": "duas palavras"}]) == []
+        with _tempfile.TemporaryDirectory() as _tmp:
+            globals()["DIR_RECIBOS"] = _tmp
+            try:
+                _em = {"A1": ("Previdenciário. Pensão por morte. Filho maior inválido. Dependência econômica presumida relativa.", "10/03/2024"),
+                       "A2": ("Administrativo. Servidor público. Adicional de fronteira durante as férias. Indenização indevida.", "11/03/2024"),
+                       "A3": ("Processual civil. Mandado de segurança. Conflito de competência entre varas federais. Domicílio do impetrante.", "12/03/2024"),
+                       "A4": ("Previdenciário. Salário-maternidade. Adoção de adolescente. Prazo de cento e vinte dias.", "13/03/2024")}
+                for _i, (_t, _dt) in _em.items():
+                    gravar_recibo({"id": _i, "base": "trf1", "numero": "0000000-00.2020.4.01.0000", "numero_digitos": "00000000020204010000", "tipo": "Acórdão",
+                                   "relator": "FULANO", "orgao": "QUINTA TURMA", "data_julgamento": _dt, "ementa": _t, "decisao": "Nega provimento."})
+                _nl = "o filho já adulto e inválido pediu a pensão de pai falecido provando que dependia dele"
+                _rn = _buscar_recibos(_nl, None, 3)
+                assert "nenhum dos 4 documento(s)" in _rn and "MAIS delas" in _rn and "BM25" in _rn and "ZERO requisição" in _rn, _rn[:400]
+                assert "id A1" in _rn.split("2. ")[0], _rn
+                assert "MAIS delas" not in _buscar_recibos("pensão morte filho", None, 3) and "id A1" in _buscar_recibos("pensão morte filho", None, 3)   # E satisfeito: modo normal
+                assert "MAIS delas" not in _buscar_recibos("pensão xyzzy", None, 3) and "0 de 4" in _buscar_recibos("pensão xyzzy", None, 3)   # menos de 3 palavras: nada de ranking
+                assert "MAIS delas" not in _buscar_recibos("", [["pensão"], ["inexistentepalavra"]], 3)   # com `grupos` o ranking não entra
+                assert "MAIS delas" not in _buscar_recibos("pensão filho zzzz yyyy", None, 3, nr_processo="0000000-00.2020")   # com filtro de processo também não
+                _top = _rankear_por_consulta(_nl, _listar_recibos(), 10)
+                assert _top[0][0]["id_documento"] == "A1" and all(isinstance(x[1], int) for x in _top)
+                # empate: data mais recente primeiro, depois id
+                _tie = [{"id_documento": "B", "ementa": "pensão morte filho inválido", "data_julgamento": "01/01/2020", "texto": "x"},
+                        {"id_documento": "A", "ementa": "pensão morte filho inválido", "data_julgamento": "01/01/2021", "texto": "x"},
+                        {"id_documento": "C", "ementa": "pensão morte filho inválido", "data_julgamento": "01/01/2021", "texto": "x"}]
+                assert [r["id_documento"] for r, _ in _rankear_por_consulta("pensão morte filho inválido", _tie, 10)] == ["A", "C", "B"]
+            finally:
+                globals()["DIR_RECIBOS"] = _dr0
+
+        # --- 3) modo triagem ---
+        _tri = _format_triagem([d_tnu], d_tnu["numero"], 1)
+        _comp = _format_decisao([d_tnu], d_tnu["numero"], 1)
+        assert "Triagem do número" in _tri and "Resultado declarado: desprovido" in _tri and "Votação declarada: unânime" in _tri and "FATOS DO JULGADO" in _tri, _tri[:900]
+        assert "Cita: Súmula 42 · Tema 692" in _tri and "id TNU00033758" in _tri and "eproctnu-jur.cjf.jus.br" in _tri and "verificação: inteiro teor lido" in _tri
+        assert "Inteiro teor (literal" not in _tri and "Ementa (integral" not in _tri and len(_tri) < len(_comp) * 0.25, (len(_tri), len(_comp))
+        _tri2 = _format_triagem([d0, irmao], d0["numero"], 2)   # dois julgamentos de datas diferentes: dois blocos
+        assert _tri2.count("\n### ") == 2 and "Sem inteiro teor nesta base" in _tri2, _tri2[:700]
+        _tri3 = _format_triagem([d0, dict(irmao, data_julgamento=d0["data_julgamento"])], d0["numero"], 2)   # mesmo julgamento: UM bloco com as duas peças e o aviso de opostos
+        assert _tri3.count("\n### ") == 1 and "resultados opostos" in _tri3 and _tri3.count(" id ") >= 2, _tri3[:900]
+        assert "Nenhum documento" in _format_triagem([], "123", 0)
+        async def _loc_um(numero, base, operacao, com_inteiro_teor=True):
+            return {"total": 1, "docs": [d0], "avisos": []}, [d0]
+        with _tempfile.TemporaryDirectory() as _tmp:
+            globals()["DIR_RECIBOS"] = _tmp
+            globals()["_localizar_por_numero"] = _loc_um
+            try:
+                _st = asyncio.run(_obter_decisao(d0["numero"], "trf1", "triagem"))
+                assert "Triagem do número" in _st and "Ementa (integral" not in _st and ler_recibo(d0["id"])["origem"] == "decisao"   # triagem também grava o recibo
+                assert "Ementa (integral" in asyncio.run(_obter_decisao(d0["numero"], "trf1")) and "Ementa (integral" in asyncio.run(_obter_decisao(d0["numero"], "trf1", "COMPLETO"))
+                assert asyncio.run(_obter_decisao(d0["numero"], "trf1", "resumo")).startswith("Erro de parâmetro")
+            finally:
+                globals()["_localizar_por_numero"] = _loc_orig
+                globals()["DIR_RECIBOS"] = _dr0
+        assert _descrever_args({"modo": "triagem"}) == {"modo": "triagem"} and _descrever_args({"modo": "Fulano"}) == {"modo": "<valor fora da lista>"}
+
+        # --- 4) inteiro teor sem repetição (só TNU) ---
+        _EM = ("PREVIDENCIÁRIO. PEDIDO DE UNIFORMIZAÇÃO. «incapacidade» preexistente ao reingresso no RGPS. Súmula 53 da TNU aplicada ao caso concreto, "
+               "com divergência demonstrada entre o acórdão recorrido e o paradigma indicado pela parte requerente do pedido.")
+        _DEC = ("A Turma Nacional de Uniformização decidiu, por unanimidade, conhecer do pedido e negar-lhe provimento, nos termos do voto do relator, "
+                "ficando prejudicado o exame das demais questões suscitadas pela parte requerente nas razões do pedido de uniformização.")
+        _EM_LIMPA = _EM.replace("«", "").replace("»", "")
+        _IT = ("Documento:1\nTIMBRE\nRELATOR : Juiz Federal FULANO DE TAL\nRELATÓRIO\nTrata-se de pedido de uniformização contra acórdão da turma recursal que negou o benefício. É o relatório.\n"
+               "EMENTA\n" + _EM_LIMPA.replace(". ", ".\n") + "\nVOTO\nNego provimento ao pedido porque a incapacidade é anterior.\n"
+               "ACÓRDÃO\n" + _DEC.replace(", ", ",\n") + "\nBrasília, 14 de maio de 2025.\n")
+        _dh = dict(d_tnu, ementa=_EM, decisao=_DEC, inteiro_teor_texto=_IT)
+        _sh = _format_decisao([_dh], _dh["numero"], 1)
+        assert _sh.count("incapacidade» preexistente") == 0 and _sh.count("Súmula 53 da TNU aplicada") == 1, _sh.count("Súmula 53 da TNU aplicada")   # a ementa só aparece no inteiro teor
+        assert _sh.count("texto idêntico a trecho do inteiro teor abaixo") == 2 and "(" + str(len(_compacto(_EM))) + " caracteres)" in _sh and "começa em «PREVIDENCIÁRIO. PEDIDO DE UNIFORMIZAÇÃO.…»" in _sh, _sh[:1500]
+        assert len(_sh) < len(_format_decisao([_dh], _dh["numero"], 1, sem_repeticao=False)) - 200
+        assert "texto idêntico" not in _format_decisao([_dh], _dh["numero"], 1, sem_repeticao=False)
+        assert "— verificação: inteiro teor lido" in _sh and "lido EM PARTE" not in _sh and "Inteiro teor (literal, eproc da TNU)" in _sh
+        # contenção é exata: palavra trocada ou caixa diferente → o texto continua inteiro
+        _s_ex = _format_decisao([dict(_dh, inteiro_teor_texto=_IT.replace("Súmula 53", "Súmula 54"))], "x", 1)
+        assert "Súmula 53 da TNU aplicada" in _s_ex.split("**Dispositivo")[0], "ementa não contida deve aparecer por inteiro"
+        assert _s_ex.count("texto idêntico a trecho do inteiro teor abaixo") == 1 and "Dispositivo: texto idêntico" in _s_ex
+        _s_cx = _format_decisao([dict(_dh, inteiro_teor_texto=_IT.replace("negar-lhe", "NEGAR-lhe"))], "x", 1)
+        assert "negar-lhe provimento" in _s_cx.split("**Inteiro teor")[0] and "Ementa: texto idêntico" in _s_cx
+        # texto curto não vira ponteiro (seria maior que o texto)
+        assert "texto idêntico" not in _format_decisao([dict(_dh, decisao="Nego provimento.", ementa="")], "x", 1).split("**Inteiro teor")[0]
+        # base trf1 (sem inteiro teor do eproc): nada muda
+        assert "texto idêntico" not in _format_decisao([d0], d0["numero"], 1)
+        # inteiro teor cortado pelo orçamento e trecho na parte não exibida: NÃO substitui
+        _orc0 = globals()["ORCAMENTO_DECISAO"]
+        globals()["ORCAMENTO_DECISAO"] = 8_000
+        try:
+            _itl = "Documento:1\nRELATÓRIO\n" + "palavra comum de enchimento. " * 400 + "\nEMENTA\n" + _EM_LIMPA + "\nACÓRDÃO\n" + _DEC
+            _sl = _format_decisao([dict(_dh, inteiro_teor_texto=_itl)], "x", 1)
+            assert "CORTADO" in _sl and "texto idêntico" not in _sl and "inteiro teor lido EM PARTE" in _sl and "Súmula 53 da TNU aplicada" in _sl.split("**Inteiro teor")[0]
+            _itc = "Documento:1\nEMENTA\n" + _EM_LIMPA + "\nACÓRDÃO\n" + _DEC + "\n" + "palavra comum de enchimento. " * 600   # trecho na parte exibida, resto cortado
+            _sc = _format_decisao([dict(_dh, inteiro_teor_texto=_itc)], "x", 1)
+            assert "CORTADO" in _sc and _sc.count("texto idêntico a trecho do inteiro teor abaixo") == 2 and "lido EM PARTE" in _sc
+        finally:
+            globals()["ORCAMENTO_DECISAO"] = _orc0
+
+        # --- 5) livro-razão de requisições e relatório de ritmo ---
+        with _tempfile.TemporaryDirectory() as _tmp:
+            _lr = os.path.join(_tmp, "ritmo.jsonl")
+            _arq0 = globals()["_ARQUIVO_RITMO"]
+            globals()["_ARQUIVO_RITMO"] = _lr
+            try:
+                assert _RITMO_ATIVO is False   # sob o selftest o livro-razão fica desligado
+                _ritmo_anotar(1_000, "busca", "ok", 200, 12.4)
+                assert not os.path.exists(_lr), "sob o selftest não grava no arquivo padrão"
+                _ritmo_anotar(1_700_000_000_000, "busca", "ok", 200, 12.4, arquivo=_lr)
+                _ritmo_anotar(1_700_000_001_500, "decisao zzz", "http_503", 503, None, arquivo=_lr)   # op fora do padrão vira "?"; nunca texto livre
+                _ritmo_anotar(1_700_000_003_000, "busca", "texto livre da busca", None, 5, arquivo=_lr)   # desfecho fora do padrão vira "inesperada"
+                _lin = [json.loads(x) for x in open(_lr, encoding="utf-8").read().split("\n") if x]
+                assert (os.stat(_lr).st_mode & 0o777) == 0o600 and len(_lin) == 3
+                assert set(_lin[0]) == {"t", "impl", "pid", "id", "op", "res", "status", "durMs"} and _lin[0]["impl"] == "py" and _lin[0]["pid"] == os.getpid()
+                assert _lin[0]["t"] == 1_700_000_000_000 and _lin[0]["op"] == "busca" and _lin[0]["res"] == "ok" and _lin[0]["status"] == 200 and _lin[0]["durMs"] == 12
+                assert _lin[1]["op"] == "?" and _lin[1]["res"] == "http_503" and _lin[1]["durMs"] is None and _lin[2]["res"] == "inesperada"
+                assert "zzz" not in open(_lr, encoding="utf-8").read() and "texto livre" not in open(_lr, encoding="utf-8").read()
+                # leitura tolera linhas do porte Node, lixo e tipos errados
+                with open(_lr, "a", encoding="utf-8") as _f:
+                    _f.write('{"t":1700000004000,"impl":"node","pid":7,"id":"honesta","op":"busca","res":"ok","status":200,"durMs":30}\nlixo{\n{"t":"x"}\n[1]\n')
+                _lido = _ritmo_ler(_lr)
+                assert len(_lido) == 4 and _lido[-1]["impl"] == "node" and _lido == sorted(_lido, key=lambda x: x["t"])
+                assert _ritmo_ler(os.path.join(_tmp, "nao-existe.jsonl")) == []
+                # rotação: guarda só as últimas linhas
+                _lr2 = os.path.join(_tmp, "rot.jsonl")
+                _rt0, _rm0 = globals()["_RITMO_TAMANHO_PARA_RODAR"], globals()["_RITMO_MAX_LINHAS"]
+                globals()["_RITMO_TAMANHO_PARA_RODAR"], globals()["_RITMO_MAX_LINHAS"] = 600, 3
+                try:
+                    for _k in range(40):
+                        _ritmo_anotar(2_000_000_000_000 + _k * 1000, "busca", "ok", 200, 1, arquivo=_lr2)
+                finally:
+                    globals()["_RITMO_TAMANHO_PARA_RODAR"], globals()["_RITMO_MAX_LINHAS"] = _rt0, _rm0
+                _rl = _ritmo_ler(_lr2)
+                assert len(_rl) <= 3 + 5 and _rl[-1]["t"] == 2_000_000_039_000, len(_rl)
+                # análise: conferência contra a conta direta
+                _seq, _t = [], 1_800_000_000_000
+                import random as _random
+                _rnd = _random.Random(7)
+                for _k in range(160):
+                    _t += int(_rnd.choice([800, 1200, 1600, 2500, 4000, 7000, 15000, 45000]))
+                    _seq.append({"t": _t, "impl": "py" if _k % 3 else "node", "pid": 1, "id": "honesta", "op": "busca",
+                                 "res": "ok" if _rnd.random() > 0.08 else _rnd.choice(["bloqueio", "http_503", "timeout", "rede", "desafio"]), "status": 200, "durMs": 5})
+                _a = _analisar_ritmo(_seq, agora_ms=_t + 1000)
+                assert _a["n"] == 160 and _a["falhas"] == sum(1 for r in _seq if r["res"] != "ok") and sum(f["reqs"] for f in _a["faixas"]) == 159
+                assert sum(f["falhas"] for f in _a["faixas"]) == sum(1 for r in _seq[1:] if r["res"] != "ok") and sum(_a["porDesfecho"].values()) == 160 and sum(_a["porOrigem"].values()) == 160
+                _melhor = 0
+                for _i in range(len(_seq)):
+                    for _j in range(_i, len(_seq)):
+                        if _seq[_j]["t"] - _seq[_i]["t"] > 60_000:
+                            break
+                        if all(x["res"] == "ok" for x in _seq[_i:_j + 1]):
+                            _melhor = max(_melhor, _j - _i + 1)
+                assert _a["maxRajadaSemFalha"] == _melhor and _melhor > 0, (_a["maxRajadaSemFalha"], _melhor)
+                _f0 = next(f for f in _a["faixas"] if f["nome"] == "< 1,5 s")
+                assert _f0["reqs"] == sum(1 for k in range(1, 160) if _seq[k]["t"] - _seq[k - 1]["t"] < 1500)
+                # relatório e recomendação: com poucos dados, manter; nunca altera parâmetro
+                _par0 = (globals()["_ESPACAMENTO_MIN_S"], globals()["_JANELA_MAX_REQS"], list(globals()["_ESCADA_JANELA_S"]))
+                _rel_pouco = _formatar_relatorio_ritmo(_analisar_ritmo(_seq[:40], agora_ms=_t))
+                assert "Dados insuficientes: 40 requisições" in _rel_pouco and "Manter os parâmetros atuais" in _rel_pouco and "nada é alterado automaticamente" in _rel_pouco, _rel_pouco
+                _rel_ok = _formatar_relatorio_ritmo(_analisar_ritmo(_seq, agora_ms=_t))
+                assert "| < 1,5 s |" in _rel_ok and "**Por desfecho:**" in _rel_ok and "node " in _rel_ok and "Maior rajada em 60 s SEM falha" in _rel_ok and "Decisão sobre qualquer parâmetro é humana" in _rel_ok
+                assert "Dados insuficientes" not in _rel_ok and "nunca texto de busca" in _rel_ok
+                assert _par0 == (globals()["_ESPACAMENTO_MIN_S"], globals()["_JANELA_MAX_REQS"], list(globals()["_ESCADA_JANELA_S"]))
+                assert "0 requisições registradas" in _relatorio_de_ritmo(arquivo=os.path.join(_tmp, "vazio.jsonl"))
+                # fim a fim: _requisitar anota cada desfecho, sem URL, consulta nem número de processo
+                class _Resp:
+                    def __init__(self, status, texto, ctype="text/html"):
+                        self.status_code, self.text, self.headers = status, texto, {"content-type": ctype}
+                class _Cli:
+                    def __init__(self, resp):
+                        self.resp = resp
+                    async def get(self, url, headers=None):
+                        if isinstance(self.resp, Exception):
+                            raise self.resp
+                        return self.resp
+                    post = get
+                class ReadTimeout(Exception):
+                    pass
+                _esp0, _at0 = globals()["_ESPACAMENTO_MIN_S"], globals()["_RITMO_ATIVO"]
+                globals()["_ESPACAMENTO_MIN_S"], globals()["_RITMO_ATIVO"] = 0.0, True
+                try:
+                    for _resp, _esperado in [(_Resp(200, "<html>javax.faces.ViewState</html>"), "ok"), (_Resp(503, "<html>erro</html>"), "http_503"),
+                                             (_Resp(429, "<html>vazio</html>"), "http_429"), (_Resp(200, "<html>Acesso bloqueado por suspeita de automação</html>"), "bloqueio"),
+                                             (_Resp(403, "<html><title>Just a moment...</title></html>"), "desafio"), (ReadTimeout("lento"), "timeout"),
+                                             (ConnectionError("sem rede"), "rede"), (_Resp(200, "<html>sem formulario</html>"), "inesperada")]:
+                        _limpar_estado()
+                        try:
+                            asyncio.run(_requisitar(_Cli(_resp), "GET", "https://jurisprudencia.cjf.jus.br/trf1/index.xhtml?q=segredo-0001369-17.2017.4.01.3606", "busca"))
+                        except (PesquisaNaoRealizada, SessaoInvalida):
+                            pass
+                        assert _ritmo_ler()[-1]["res"] == _esperado, (_esperado, _ritmo_ler()[-1])
+                    _limpar_estado()
+                finally:
+                    globals()["_ESPACAMENTO_MIN_S"], globals()["_RITMO_ATIVO"] = _esp0, _at0
+                _bruto = open(_lr, encoding="utf-8").read()
+                assert "segredo" not in _bruto and "0001369" not in _bruto and "jurisprudencia.cjf" not in _bruto and _bruto.count("\n") == 8 + 4 + 3, _bruto.count("\n")
+                assert (os.stat(_lr).st_mode & 0o777) == 0o600 and "Relatório de ritmo do portal do CJF" in _relatorio_de_ritmo(arquivo=_lr)
+            finally:
+                globals()["_ARQUIVO_RITMO"] = _arq0
+                _limpar_estado()
+        assert not os.path.exists(os.path.join(_recibos_reais, _INDICE_BUSCA)) or os.environ.get("TRF1_MCP_DIR_RECIBOS")   # a pasta real não foi tocada
+        _shutil_fim = __import__("shutil")
+        _shutil_fim.rmtree(globals()["DIR_RECIBOS"], ignore_errors=True)
+        globals()["DIR_RECIBOS"] = _recibos_reais
         print("selftest offline OK")
 
         if "--online" in sys.argv:

@@ -49,10 +49,10 @@ import threading
 import time
 import unicodedata
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
-VERSAO = "1.5.4"
+VERSAO = "1.5.5"
 REPO_GITHUB = "robertogecia/trf1-jurisprudencia-mcp"
 
 try:
@@ -511,18 +511,51 @@ _RE_DESPROVIDO = re.compile(
     r"\b(DESPROVI|IMPROVI|NAO PROVI|NEG\w*(-(SE|LHE|LHES)| SE)? (INTEGRAL |PARCIAL )?PROVIMENTO"
     r"|PROVIMENTO NEGADO)", re.ASCII
 )
+# v1.5.5: "PROVER" (TNU: "CONHECER e PROVER PARCIALMENTE o pedido") também é provimento.
 _RE_PROVIDO = re.compile(
-    r"(?<!NAO )\b(PROVI(DO|DOS|DA|DAS)\b"
+    r"(?<!NAO )\b(PROVI(DO|DOS|DA|DAS)\b|PROVER\b"
     r"|D(A|AO|AR|OU|ERAM|EU)(-(SE|LHE|LHES)| SE)? (INTEGRAL |PARCIAL )?PROVIMENTO)", re.ASCII
 )
-_RE_REJEITADO = re.compile(r"\bREJEIT", re.ASCII)
-_RE_ACOLHIDO = re.compile(r"\bACOLH", re.ASCII)
+# v1.5.5 (porte do TJRO v1.30): "embargos NÃO acolhidos" é rejeição, não acolhimento.
+_RE_REJEITADO = re.compile(r"\bREJEIT|\bNAO ACOLH", re.ASCII)
+_RE_ACOLHIDO = re.compile(r"(?<!NAO )\bACOLH", re.ASCII)
 _RE_PREJUDICADO = re.compile(r"\bPREJUDICAD", re.ASCII)
+# v1.5.5 (porte do TJRO v1.31/v1.35): PARCIAL é qualificador do PROVIDO (o par _OPOSTOS não muda). Cobre as duas ordens
+# ("parcial provimento", "provimento parcial", "parcialmente provido", "provido em parte", "RECURSO PROVIDO PARCIALMENTE").
+_RE_PARCIAL = re.compile(
+    r"\bPARCIAL(MENTE)? PROVI|\bPARCIAL PROVIMENTO|\bPROVIMENTO PARCIAL|\bPROVIMENTO EM PARTE"
+    r"|\bPROVID[OA]S? EM PARTE|\bPROVID[OA]S? PARCIALMENTE|\bPROVER (PARCIALMENTE|EM PARTE)", re.ASCII)
+# Embargos de declaração: o par ACOLHIDO × REJEITADO só vale neles; "provimento"/"negar provimento" aos embargos é acolhimento/rejeição.
+_RE_EMBARGOS_DECL = re.compile(r"\bEMBARGOS (DE DECLARACAO|DECLARATORIOS|ACLARATORIOS|(NAO )?PROVIDOS?|REJEITADOS?|ACOLHIDOS?|PARCIALMENTE)", re.ASCII)
+_RE_EMBARGOS_OUTROS = re.compile(r"\bEMBARGOS (DE TERCEIRO|A EXECUCAO|DE EXECUCAO|MONITORIOS|INFRINGENTES)", re.ASCII)
+_RE_CLASSE_EMBARGOS = re.compile(r"EMBARGOS DE DECLARA", re.ASCII)
+_RE_ED_PARCIAL = re.compile(
+    r"\bPARCIALMENTE (ACOLH|PROVID)|\b(ACOLH|PROVID)\w* (PARCIALMENTE|EM PARTE)|\bPARCIAL (ACOLHIMENTO|PROVIMENTO)"
+    r"|\bPROVIMENTO (PARCIAL|EM PARTE)", re.ASCII)
+_RE_ED_OUTRO_OBJETO = re.compile(r"\b(AGRAVO|APELACAO|RECURSO|REMESSA|RECURSAL|RECURSOS)\b", re.ASCII)
+_RE_ED_EXPLICITO = re.compile(r"\bEMBARGOS( DE DECLARACAO)?( \w+)? (PARCIALMENTE|EM PARTE)|\bEMBARGOS( DE DECLARACAO)? (ACOLHID|PROVID)\w* (PARCIALMENTE|EM PARTE)", re.ASCII)
 
 
-def _resultado_de(texto: str) -> set[str]:
+def _parcial_dos_embargos(cauda: str) -> bool:
+    """O qualificador "parcial" é dos EMBARGOS só quando a oração dele fala dos embargos (ou de ninguém mais): "embargos
+    acolhidos, para dar parcial provimento ao recurso" continua acolhimento integral (porte do TJRO v1.31.0)."""
+    return any(
+        _RE_ED_PARCIAL.search(seg) and (not _RE_ED_OUTRO_OBJETO.search(seg) or _RE_ED_EXPLICITO.search(seg))
+        for seg in re.split(r"[,.;:]", str(cauda or ""))
+    )
+
+
+def _eh_embargos_texto(cauda_fold_upper: str, classe: str = "") -> bool:
+    """É julgamento de embargos de declaração? Pela classe do índice ("EMBARGOS DE DECLARAÇÃO NA APELAÇÃO CIVEL") ou pelo próprio dispositivo."""
+    if _RE_CLASSE_EMBARGOS.search(_fold(classe or "").upper()):
+        return True
+    return bool(_RE_EMBARGOS_DECL.search(cauda_fold_upper)) and not _RE_EMBARGOS_OUTROS.search(cauda_fold_upper)
+
+
+def _resultado_com_embargos(texto: str, classe: str = "") -> tuple[set[str], bool]:
     t = _fold(texto).upper()
     cauda = t[-2500:] if len(t) > 2500 else t
+    embargos = _eh_embargos_texto(cauda, classe)
     r: set[str] = set()
     if _RE_NAO_CONHECIDO.search(cauda):
         r.add("NÃO CONHECIDO")
@@ -538,7 +571,24 @@ def _resultado_de(texto: str) -> set[str]:
         r.add("ACOLHIDO")
     if _RE_PREJUDICADO.search(cauda):
         r.add("PREJUDICADO")
-    return r
+    if _RE_PARCIAL.search(cauda):
+        r.add("PARCIAL")
+    if embargos:
+        # "embargos providos" = acolhidos; "negar provimento aos embargos" = rejeitados; o parcial só vale se for da oração dos embargos
+        r.discard("PARCIAL")
+        if "PROVIDO" in r:
+            r.discard("PROVIDO")
+            r.add("ACOLHIDO")
+        if "DESPROVIDO" in r:
+            r.discard("DESPROVIDO")
+            r.add("REJEITADO")
+        if "ACOLHIDO" in r and "REJEITADO" not in r and _parcial_dos_embargos(cauda):
+            r.add("PARCIAL")
+    return r, embargos
+
+
+def _resultado_de(texto: str, classe: str = "") -> set[str]:
+    return _resultado_com_embargos(texto, classe)[0]
 
 
 def _lado_de(conjunto: set[str], par: tuple[str, str]) -> str | None:
@@ -548,30 +598,77 @@ def _lado_de(conjunto: set[str], par: tuple[str, str]) -> str | None:
     return a if a in conjunto else b if b in conjunto else None
 
 
-_ROTULOS_RESULTADO = {"PROVIDO": "provido", "DESPROVIDO": "desprovido", "ACOLHIDO": "acolhido",
-                      "REJEITADO": "rejeitado", "PREJUDICADO": "prejudicado", "NÃO CONHECIDO": "não conhecido"}
+_ROTULOS_RESULTADO = {"PROVIDO": "provido", "PARCIAL": "parcial (provido ou acolhido em parte)", "DESPROVIDO": "desprovido",
+                      "ACOLHIDO": "acolhido", "REJEITADO": "rejeitado", "PREJUDICADO": "prejudicado", "NÃO CONHECIDO": "não conhecido"}
+
+
+def _rotulo_do_conjunto(conjunto: set[str], embargos: bool = False) -> str | None:
+    """Rótulo único de um julgamento (PROVIDO/PARCIAL/DESPROVIDO/ACOLHIDO/REJEITADO) ou None (sem sinal ou ambíguo).
+    Fora de embargos decide o par do MÉRITO: "preliminar rejeitada" não manda o julgamento para "ambíguo" (porte do TJRO v1.30);
+    em embargos o par ACOLHIDO × REJEITADO vem primeiro. Os dois lados do mesmo par continuam ambíguos."""
+    ordem = [_OPOSTOS[1], _OPOSTOS[0]] if embargos else [_OPOSTOS[0], _OPOSTOS[1]]
+    for par in ordem:
+        if par[0] in conjunto and par[1] in conjunto:
+            return None
+        lado = _lado_de(conjunto, par)
+        if lado:
+            return "PARCIAL" if lado in ("PROVIDO", "ACOLHIDO") and "PARCIAL" in conjunto else lado
+    return None
 
 
 def _resumo_resultados_pagina(docs: list[dict]) -> dict:
     """Contagem OFFLINE de quantos JULGAMENTOS (nº + data) declaram cada resultado no
     dispositivo. Indício para escolher o que ler, nunca conclusão sobre a tese."""
-    por_julgamento: dict[str, set[str]] = {}
+    por_julgamento: dict[str, dict] = {}
     for i, d in enumerate(docs):
         chave = f"{d['numero_digitos']}|{d['data_julgamento']}" if d["numero_digitos"] and d["data_julgamento"] else f"#{i}"
-        por_julgamento.setdefault(chave, set()).update(_resultado_de(d.get("decisao") or ""))
+        j = por_julgamento.setdefault(chave, {"conj": set(), "emb": False})
+        conj, emb = _resultado_com_embargos(d.get("decisao") or "", d.get("classe") or "")
+        j["conj"] |= conj
+        j["emb"] = j["emb"] or emb
     contagem = {k: 0 for k in _ROTULOS_RESULTADO}
     sem = 0
-    for conjunto in por_julgamento.values():
-        lados = [l for l in (_lado_de(conjunto, par) for par in _OPOSTOS) if l]
-        if len(lados) == 1:
-            contagem[lados[0]] += 1
-        elif not lados and "PREJUDICADO" in conjunto:
+    for j in por_julgamento.values():
+        conjunto = j["conj"]
+        rot = _rotulo_do_conjunto(conjunto, j["emb"])
+        if rot:
+            contagem[rot] += 1
+        elif "PREJUDICADO" in conjunto:
             contagem["PREJUDICADO"] += 1
-        elif not lados and "NÃO CONHECIDO" in conjunto:
+        elif "NÃO CONHECIDO" in conjunto:
             contagem["NÃO CONHECIDO"] += 1
         else:
             sem += 1
     return {"contagem": contagem, "sem_resultado": sem, "total_julgamentos": len(por_julgamento)}
+
+
+# --- Frase do dispositivo que acolhe os embargos (porte do TJRO v1.35.0) ------------ #
+_RE_ABREV_FIM = re.compile(r"(?:^|[^A-Za-zÀ-ÿ])(?:art|arts|n|nº|no|nos|fl|fls|id|des|desa|dr|dra|sr|sra|min|rel|inc|par|proc|cf|fed)\.$", re.I)
+
+
+def _frases_do_texto(t: str) -> list[str]:
+    """Divide em frases e junta de novo o pedaço que termina em abreviação ("art.", "Des.")."""
+    out: list[str] = []
+    for p in re.split(r"(?<=[.;])\s+(?=[A-ZÀ-Ý0-9])", t or ""):
+        if out and _RE_ABREV_FIM.search(out[-1]):
+            out[-1] += " " + p
+        else:
+            out.append(p)
+    return out
+
+
+def _frase_dos_embargos(dispositivo: str, maximo: int = 360) -> str:
+    """A frase LITERAL do dispositivo que acolhe os embargos (sem rótulo de subtipo: o rótulo "erro material/omissão/efeito
+    infringente" errou em 20 de 32 no TJRO, v1.35.0). Vazio quando nenhuma frase fala dos embargos acolhidos."""
+    def ok(f: str) -> bool:
+        x = _fold(f).upper()
+        return bool(re.search(r"EMBARGOS|ACLARATORI|DECLARATORI", x)) and bool(
+            _RE_ACOLHIDO.search(x) or re.search(r"\bDOU PROVIMENTO|(?<!NAO )\bPROVIDOS?\b|\bDAR PROVIMENTO|\bDEU PROVIMENTO", x))
+    fr = [f for f in _frases_do_texto(re.sub(r"\s+", " ", dispositivo or "").strip()) if ok(f)]
+    if not fr:
+        return ""
+    f = fr[0]
+    return f[:maximo].rstrip() + "…" if len(f) > maximo else f
 
 
 # --- Atribuição: de quem é a frase (portado do servidor do TJSE, 22/09/2026) ------- #
@@ -806,7 +903,7 @@ _RE_DOC_TNU = re.compile(r"(?m)^[ \t]*(?:Documento:[ \t]*\d+|Extrato de Ata)[ \t
 _RE_CAB_TNU = re.compile(r"(?m)^[ \t]*(RELAT[ÓO]RIO|EMENTA|AC[ÓO]RD[ÃA]O|EXTRATO DE ATA[^\n]*|VOTO(?:[ \t-]+[A-ZÀ-Ú]+){0,3})[ \t]*$")
 
 
-def _posicao_tnu(texto: str, meio: int) -> str:
+def _posicao_tnu(texto: str, meio: int, detalhe: dict | None = None) -> str:
     """POSIÇÃO NO JULGADO no inteiro teor da TNU (eproc, 06/10/2026). O inteiro teor junta documentos, cada um aberto por
     "Documento:NNN" e o timbre do CJF até a linha "RELATOR :": RELATÓRIO + VOTO do relator; EMENTA + ACÓRDÃO ("A Turma Nacional…
     decidiu…"); votos de outros juízes (VOTO-VISTA, VOTO DIVERGENTE); e o "Extrato de Ata" (certidão: votação e votantes)."""
@@ -868,6 +965,10 @@ def _posicao_tnu(texto: str, meio: int) -> str:
                 outro = any(x in k for x in ("vista", "divergente", "vencido", "vogal")) or (
                     relator and re.search(r"juiz[a]? federal", ini) and relator[-1] not in ini)
                 (outros.append((r[0], r[1], "VOTO de outro juiz (vista, divergente ou vogal) que não lavrou o acórdão")) if outro else votos.append(r))
+    if detalhe is not None:   # onde começa o voto de outro juiz que contém o trecho (para o alerta de VOTO DIVERGENTE mostrar a abertura)
+        _o = next((a for a, b, _ in outros if a <= meio < b), None)
+        if _o is not None:
+            detalhe["inicio"] = _o
     return _posicao_generica(texto, meio, ementa=ementa, fecho=fecho, relatorio=rel, votos=votos, outros=outros, certidao=cert)
 
 
@@ -1146,14 +1247,39 @@ def _trechos_obiter(texto: str, ini: int = 0, fim: int | None = None) -> list[st
         ate = b
     return out
 
-def _obiter_antes(tn: str, ini0: int, fim: int, bruto: str):
+def _obiter_antes_com_pos(tn: str, ini0: int, fim: int, bruto: str):
+    """Além da marca, onde ela está (porte do TJRO v1.33.0), para o alerta mostrar a frase."""
     cabeca = ini0 + int((fim - ini0) * _OBITER_CABECA)
     piso = max(0, ini0 - _OBITER_JANELA)
     frase0 = _inicio_da_frase(bruto, tn, piso, cabeca)
     m = None
     for x in _RE_OBITER.finditer(tn[frase0:cabeca]):
         m = x
-    return m.group(0) if m else None
+    return {"marca": m.group(0), "de": frase0, "pos": frase0 + m.start()} if m else None
+
+
+def _obiter_antes(tn: str, ini0: int, fim: int, bruto: str):
+    r = _obiter_antes_com_pos(tn, ini0, fim, bruto)
+    return r["marca"] if r else None
+
+
+def _em_uma_linha(x) -> str:
+    return re.sub(r"\s+", " ", str(x)).strip()
+
+
+def _abertura(texto: str, ini: int, n: int = 220) -> str:
+    """Os primeiros `n` caracteres a partir de `ini`, em uma linha, com reticências só quando cortou."""
+    f = _em_uma_linha(texto[ini:ini + n + 1])
+    return f[:n].rstrip() + "…" if len(f) > n else f
+
+
+def _frase_do_obiter(texto: str, ob: dict, ini0: int) -> str:
+    """A frase onde está a marca de obiter, ou o aviso de que a marca já está no começo do próprio trecho citado."""
+    if ob["pos"] >= ini0:
+        return " A marca está no começo do próprio trecho citado."
+    ini = max(ob["de"], ob["pos"] - 40)
+    f = _em_uma_linha(texto[ini:ini0])
+    return f" A frase: «{f[:260] + '…' if len(f) > 260 else f}» + o trecho."
 
 
 def conferir(texto: str, trecho: str, tribunal: str = "TNU", com_atribuicao: bool = True) -> dict[str, Any]:
@@ -1196,8 +1322,11 @@ def conferir(texto: str, trecho: str, tribunal: str = "TNU", com_atribuicao: boo
                            f"palavra da {tribunal}. Se for citar, cite como a {tribunal} citando; melhor: pesquise o original.")
         div = faixa_divergente(tn, 0)
         if div and any(b > div[0] for _, b in spans):
+            _ini_div = _bruto(str(texto or ""), tn, div[0])
+            _txt_div = str(texto or "")
             alertas.append("VOTO DIVERGENTE: o trecho vem depois de um sinal de divergência no acórdão (pedido de vênia, voto "
-                           "vencido ou voto-vista). Pode ser o voto VENCIDO — leia quem venceu antes de citar como entendimento do órgão.")
+                           "vencido ou voto-vista). Pode ser o voto VENCIDO — leia quem venceu antes de citar como entendimento do órgão."
+                           f" Essa parte começa assim: «{_abertura(_txt_div, _ini_div)}».")
     # v1.2.0 (06/10/2026): regras do TJRO v1.13/1.15 sobre _norm1(bruto) (1:1), localizando o trecho perto do casamento oficial
     bruto = str(texto or "")
     nt = _norm1(bruto)
@@ -1212,11 +1341,12 @@ def conferir(texto: str, trecho: str, tribunal: str = "TNU", com_atribuicao: boo
     if fx and _negacao_escopo(nt, fx[0], fx[1], bruto):
         alertas.append("NEGAÇÃO: há negativa logo antes do trecho — o recorte pode inverter o julgado. Não citar sem ler a frase inteira."
                        if _negacao_proxima(nt, fx[0]) else "NEGAÇÃO (distante)?: há uma negativa algumas palavras antes do trecho, fora dele. Na maioria das vezes ela fecha a própria oração e não inverte o recorte (medido às cegas), mas leia a frase inteira antes de citar.")
-    ob = _obiter_antes(nt, fx[0], fx[1], bruto) if (com_atribuicao and not em_transcricao and fx and not any(a.startswith("ENTRE ASPAS") for a in alertas)) else None
+    ob = _obiter_antes_com_pos(nt, fx[0], fx[1], bruto) if (com_atribuicao and not em_transcricao and fx and not any(a.startswith("ENTRE ASPAS") for a in alertas)) else None
     if ob:
-        alertas.append(f"OBITER DICTUM?: o trecho vem sob «{ob}» — raciocínio hipotético ou fundamento alternativo; o resultado do "
-                       "julgado não dependeu dele. Vale como reforço, não como ratio decidendi; cite dizendo que é obiter.")
-    posicao = _posicao_tnu(bruto, (fx[0] + fx[1]) // 2) if (com_atribuicao and fx and tribunal == "TNU") else ""
+        alertas.append(f"OBITER DICTUM?: o trecho vem sob «{ob['marca']}» — raciocínio hipotético ou fundamento alternativo; o resultado do "
+                       "julgado não dependeu dele. Vale como reforço, não como ratio decidendi; cite dizendo que é obiter." + _frase_do_obiter(bruto, ob, fx[0]))
+    det_pos: dict = {}
+    posicao = _posicao_tnu(bruto, (fx[0] + fx[1]) // 2, det_pos) if (com_atribuicao and fx and tribunal == "TNU") else ""
     if posicao and com_atribuicao:
         # TNU (gabarito cego próprio de 06/10/2026): o voto de OUTRO juiz se reconhece pelo título do documento ("VOTO-VISTA",
         # "VOTO DIVERGENTE", outro nome) — precisão 85% contra 62% do sinal de divergência no texto, mesma cobertura
@@ -1224,10 +1354,12 @@ def conferir(texto: str, trecho: str, tribunal: str = "TNU", com_atribuicao: boo
         if k is not None:
             alertas.pop(k)
         if posicao.startswith("VOTO de outro juiz") or posicao.startswith("VOTO do relator VENCIDO"):
+            _ini_v = det_pos.get("inicio")
             alertas.insert(k if k is not None else (1 if em_transcricao else 0),
                            "VOTO DIVERGENTE: o trecho está num voto que NÃO é o de quem lavrou o acórdão (vista, divergente, vogal ou o "
                            "do relator vencido) — pode ter ficado vencido ou só acompanhado. Leia o acórdão/extrato de ata antes de citar "
-                           "como entendimento da TNU.")
+                           "como entendimento da TNU."
+                           + (f" Esse voto começa assim: «{_abertura(bruto, _ini_v)}»." if _ini_v is not None else ""))
     return {"ok": True, "alertas": alertas, "contexto": re.sub(r"\s+", " ", tn[max(0, (ini0 or 0) - 120): pos + 120]),
             "spans": spans, "tn": tn, "posicao": posicao}
 
@@ -1373,7 +1505,7 @@ def _tese_da_ementa(texto: str, teto: int = _TESE_MAX):
         if ate:
             p = ate[-1]
             return {"texto": tese[:p].rstrip(" "), "total": total, "exibidos": inicios.index(p), "completa": False}
-    fim = tese.rfind(". ", 0, teto)
+    fim = tese.rfind(". ", 0, teto + 1)   # JS: lastIndexOf(". ", teto - 1) aceita o ponto na posição teto - 1; rfind(…, end) é exclusivo e o par ocupa 2 posições
     corte = tese[:fim + 1] if fim > 0 else re.sub(r" \S*$", "", tese[:teto])
     return {"texto": corte.strip(), "total": total, "exibidos": 0, "completa": False}
 
@@ -1408,13 +1540,17 @@ def _fatos_do_julgado(it: str):
     Devolve (onde, texto) ou ""."""
     if not it:
         return ""
-    for sec in _secoes_da_ementa(it, 0, len(it)):
-        if sec["nome"] == "caso em exame":
-            ini = sec["a"]
-            m = re.match(r"\s*(?:[IVXivx]{1,3}\s*[.)-]?\s*)?[Cc][Aa][Ss][Oo] [Ee][Mm] [Ee][Xx][Aa][Mm][Ee]\s*[.:]?\s*", it[ini:sec["b"]])
-            txt = it[ini + (m.end() if m else 0):sec["b"]].strip()
-            if len(txt) > 40:
-                return ("ementa › caso em exame", txt[:_FATOS_MAX])
+    # v1.5.5 (porte do TJRO v1.37): o voto pode transcrever a ementa de OUTRO processo; fica o ÚLTIMO "caso em exame" fora de transcrição,
+    # que é a ementa do próprio acórdão (a transcrita vem antes, dentro do voto)
+    secs = [x for x in _secoes_da_ementa(it, 0, len(it)) if x["nome"] == "caso em exame"]
+    trans = faixas_transcritas(_norm1(it), 0) if len(secs) > 1 else []
+    proprias = [x for x in secs if not any(a <= x["a"] < b for a, b in trans)]
+    for sec in reversed(proprias):
+        ini = sec["a"]
+        m = re.match(r"\s*(?:[IVXivx]{1,3}\s*[.)-]?\s*)?[Cc][Aa][Ss][Oo] [Ee][Mm] [Ee][Xx][Aa][Mm][Ee]\s*[.:]?\s*", it[ini:sec["b"]])
+        txt = it[ini + (m.end() if m else 0):sec["b"]].strip()
+        if len(txt) > 40:
+            return ("ementa › caso em exame", txt[:_FATOS_MAX])
     mr = re.search(r"(?m)^[ \t]*RELAT[ÓO]RIO[ \t]*$", it[:6000])
     if mr:
         mv = re.compile(r"(?mi)^[ \t]*VOTO\b[^\n]*$|\b[ÉEé]\s+o\s+(?:breve\s+)?relat[óo]rio\b").search(it, mr.end())
@@ -1422,6 +1558,23 @@ def _fatos_do_julgado(it: str):
         txt = _RE_LIXO_WORD.sub("", it[mr.end():fim].strip(" \t\n:.-")).strip()
         if len(txt) > 40 and not re.search(r"(?i)relat[óo]rio\s+(?:formal\s+)?dispensad[oa]|dispensad[oa]\s+o\s+relat[óo]rio|dispens[ao]\s+o\s+relat[óo]rio", txt[:200]):
             return ("relatório do acórdão", txt[:_FATOS_MAX])
+    return ""
+
+
+_RE_RELATOR_VENCIDO_FECHO = re.compile(r"\bvencid[oa]s? (?:\w+ ){0,6}?(?:o|a|o\(a\)) relator(?:a|\(a\))?\b")
+
+
+def _relator_vencido(d: dict) -> str:
+    """Devolve o relator do acórdão (ou "?") quando o relator do cabeçalho ficou VENCIDO: o fecho diz "vencido o relator" ou a ata traz
+    "RELATOR DO ACÓRDÃO" diferente do relator. Vazio quando não há sinal (porte do TJRO v1.37)."""
+    it = d.get("inteiro_teor_texto") or ""
+    if not it:
+        return ""
+    rt = d.get("relator_texto") if "relator_texto" in d else _fecho_tnu(it)["relator_texto"]
+    ra = d.get("relator_acordao_texto") if "relator_acordao_texto" in d else _fecho_tnu(it)["relator_acordao_texto"]
+    diferente = bool(rt and ra and norm(ra) != norm(rt) and norm(ra) not in norm(rt) and norm(rt) not in norm(ra))
+    if diferente or _RE_RELATOR_VENCIDO_FECHO.search(_norm1(it[-6000:])):
+        return ra or "?"
     return ""
 
 
@@ -1433,6 +1586,10 @@ def _linha_fatos(d: dict) -> str:
     aviso = ""
     if f[0].startswith("relatório"):
         aviso = " ⚠️ É o relatório: narra o pedido e as alegações das partes, NÃO o fundamento nem o resultado; confira os dois no voto e no fecho."
+        _venc = _relator_vencido(d)
+        if _venc:
+            aviso += (" ⚠️ Relator VENCIDO: o voto que segue o relatório é o vencido; os fatos e fundamentos que decidem estão no voto vencedor"
+                      + (f" (relator do acórdão: {_venc})." if _venc != "?" else "."))
     elif _RE_ALEGACAO_FATOS.search(f[1]):
         aviso = " ⚠️ O trecho contém alegação da parte (sustentou/alega/afirma): é o que a parte diz, não fato reconhecido pelo julgado; não o transforme em fato na ficha."
     return f"📌 FATOS DO JULGADO (trecho literal, {f[0]}; não é resumo meu): \"{ft}\"{aviso}"
@@ -1693,6 +1850,170 @@ def _nota_inteiro_teor(d: dict) -> str:
     return "Inteiro teor: link não informado pelo portal."
 
 
+# --- Julgado recente (porte do TJRO v1.34.0) ---------------------------------------- #
+_RECENTE_DIAS = 30
+
+
+def _dias_desde_data_br(data_br: str, hoje: date) -> int | None:
+    m = re.fullmatch(r"\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*", str(data_br or ""))
+    if not m:
+        return None
+    try:
+        dt = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None   # data impossível ("31/11/2026") não vira "recente"
+    return (hoje - dt).days
+
+
+def _dias_recente(d: dict, hoje: date | None = None) -> int | None:
+    """Dias desde o julgamento, se forem até _RECENTE_DIAS; senão None. Olha a data do índice e a do fecho (TNU, quando o
+    inteiro teor veio) e fica com a menor distância; data futura ou inválida não conta."""
+    hoje = hoje or date.today()
+    dias = [x for x in (_dias_desde_data_br(d.get("data_julgamento") or "", hoje), _dias_desde_data_br(d.get("data_fecho") or "", hoje))
+            if x is not None and 0 <= x <= _RECENTE_DIAS]
+    return min(dias) if dias else None
+
+
+# --- Resultados no mesmo número (porte do TJRO v1.30 e v1.35) ----------------------- #
+def _rotulo_documento(conj: set[str], emb: bool) -> str:
+    r = _rotulo_do_conjunto(conj, emb)
+    return _ROTULOS_RESULTADO.get(r, "sem resultado identificável") if r else "sem resultado identificável"
+
+
+def _avisos_opostos(irmaos: list[dict]) -> list[str]:
+    """Documentos do MESMO julgamento (nº + data) que declaram lados opostos. O par ACOLHIDO × REJEITADO só vale entre embargos de
+    declaração e o par PROVIDO × DESPROVIDO só fora deles: embargos não se comparam com apelação ("preliminar rejeitada" com o
+    mérito acolhido era falso alarme no TJRO). O aviso diz qual documento diz o quê."""
+    por_data: dict[str, list[dict]] = {}
+    for x in irmaos:
+        if x.get("data_julgamento"):
+            por_data.setdefault(x["data_julgamento"], []).append(x)
+    out: list[str] = []
+    for data, grupo in por_data.items():
+        info = [(x,) + _resultado_com_embargos(x.get("decisao") or "", x.get("classe") or "") for x in grupo]
+        for par in _OPOSTOS:
+            lados = [(x, _lado_de(conj, par), conj) for x, conj, emb in info if emb == (par[0] == "ACOLHIDO")]
+            lados = [t for t in lados if t[1]]
+            if len({t[1] for t in lados}) > 1:
+                quem = "; ".join(
+                    f"id {x['id']} ({x.get('tipo') or '?'}): {_ROTULOS_RESULTADO['PARCIAL'] if (l == 'PROVIDO' and 'PARCIAL' in conj) else _ROTULOS_RESULTADO[l]}"
+                    for x, l, conj in lados)
+                out.append(f"⚠️ Documentos do julgamento de {data} declaram resultados opostos: {quem}. Provável voto vencido ou decisão monocrática "
+                           "indexada; leia cada um e cite pelo id.")
+    return out
+
+
+def _avisos_entre_julgamentos(irmaos: list[dict]) -> list[str]:
+    """Julgamentos de datas diferentes sob o mesmo número: resultados de mérito diferentes (recurso diferente ou reemissão) e embargos
+    ACOLHIDOS, que podem ter mudado o resultado. Embargos não entram na comparação de resultado com a apelação."""
+    por_data: dict[str, list[dict]] = {}
+    for x in irmaos:
+        if x.get("data_julgamento"):
+            por_data.setdefault(x["data_julgamento"], []).append(x)
+    if len(por_data) < 2:
+        return []
+    res: list[tuple[str, str]] = []
+    ed_ac: list[str] = []
+    for data, grupo in por_data.items():
+        info = [_resultado_com_embargos(x.get("decisao") or "", x.get("classe") or "") for x in grupo]
+        conj = set().union(*(c for c, _ in info))
+        emb = any(e for _, e in info)
+        r = _rotulo_do_conjunto(conj, emb)
+        ident = f"{data} (id {grupo[0]['id']})"
+        if emb:
+            if r in ("ACOLHIDO", "PARCIAL"):
+                ed_ac.append(ident)
+        elif r in ("PROVIDO", "PARCIAL", "DESPROVIDO"):
+            res.append((ident, _ROTULOS_RESULTADO[r]))
+    out: list[str] = []
+    if len({r for _, r in res}) > 1:
+        out.append("⚠️ Os julgamentos deste número declaram resultados diferentes: " + "; ".join(f"{i}: {r}" for i, r in res)
+                   + ". Pode ser recurso diferente (apelação e agravo interno) ou reemissão; confira qual vigora antes de citar o resultado.")
+    if ed_ac:
+        out.append("⚠️ Embargos de declaração ACOLHIDOS em " + "; ".join(ed_ac)
+                   + ": se tiveram efeito infringente, o resultado vigente é o deles, não o da decisão embargada; leia o dispositivo dos embargos.")
+    return out
+
+
+# --- Placar do limitador no fim da busca (porte do TJRO v1.34.0) -------------------- #
+def _linha_de_ritmo(agora: float | None = None) -> str:
+    """Quantas requisições esta máquina fez na janela atual e o nível do limitador. Só LÊ o estado do disjuntor (nenhuma requisição
+    nova); o estado é compartilhado por todos os processos desta extensão nesta máquina."""
+    try:
+        agora = time.time() if agora is None else agora
+        with _trava_estado():
+            e = _ler_estado()
+        idx = max(0, min(int(e.get("indice_janela") or 0), len(_ESCADA_JANELA_S) - 1))
+        janela = _ESCADA_JANELA_S[idx]
+        na_janela = len([t for t in (e.get("requisicoes") or []) if agora - t <= janela])
+        return (f"\n_Ritmo do portal: {na_janela} de {_JANELA_MAX_REQS} requisições na janela atual de {_fmt_hms(janela)} (nível {idx + 1} de "
+                f"{len(_ESCADA_JANELA_S)}), contando todos os processos desta extensão nesta máquina; cada busca gasta 2 a 4. Se o seu roteiro "
+                "tem teto por frente, conte as suas chamadas: este número só diz o fôlego do limitador._")
+    except Exception:
+        return ""
+
+
+# --- Saída grande (porte do TJRO v1.33.0) ------------------------------------------- #
+_SAIDA_MAX_CHARS = 80_000
+_RE_INICIO_RESULTADO = re.compile(r"\n\*\*(\d+)\. ")
+_RE_RODAPE_BUSCA = re.compile(r"\n(?:ℹ️ Ementas cortadas|Resumo desta página|Próxima página:)")
+
+
+def _limitar_saida_busca(texto: str, maximo: int = _SAIDA_MAX_CHARS, pagina: int = 1, por_pagina: int = 30) -> str:
+    """Resultado grande demais é desviado pelo cliente para um arquivo que o subagente não lê. Acima de `maximo` caracteres corta no
+    limite de UM resultado, mantém o rodapé (resumo da página) e diz quantos couberam e como pedir o resto."""
+    t = str(texto or "")
+    if len(t) <= maximo:
+        return t
+    ini = [(m.start(), int(m.group(1))) for m in _RE_INICIO_RESULTADO.finditer(t)]
+    if len(ini) < 2:
+        return t[:maximo] + "\n\n[SAÍDA CORTADA no limite de caracteres; repita com por_pagina menor.]\n"
+    rod = _RE_RODAPE_BUSCA.search(t, ini[-1][0])
+    corpo_fim = rod.start() if rod else len(t)
+    rodape = t[corpo_fim:]
+    rodape = re.sub(r"\nPróxima página:[^\n]*", "", rodape)   # a página seguinte pularia os resultados cortados
+    limite = maximo - len(rodape) - 600
+    caber = [i for i, (pos, _) in enumerate(ini) if (ini[i + 1][0] if i + 1 < len(ini) else corpo_fim) <= limite]
+    if not caber:
+        caber = [0]
+    k = caber[-1] + 1                      # resultados inteiros que cabem
+    ate = ini[k][0] if k < len(ini) else corpo_fim
+    primeira = (pagina - 1) * por_pagina
+    sugestao = (f"por_pagina=10 e pagina={primeira // 10 + 1}" if por_pagina > 10 and primeira % 10 == 0 else "por_pagina=10")
+    aviso = (f"\n\n[SAÍDA CORTADA: {k} de {len(ini)} resultados cabem aqui (limite de {maximo // 1000} mil caracteres, para a resposta não ser "
+             f"desviada para arquivo). Repita com {sugestao}; os {len(ini) - k} restantes desta página não vieram.]\n")
+    return t[:ate].rstrip() + aviso + rodape
+
+
+# --- Consulta grande recusada pelo portal (porte do TJRO v1.33.0) ------------------- #
+_RE_OPERADOR_CONSULTA = re.compile(r"^(?:E|OU|NAO|NÃO|ADJ\d*|PROX\d*|COM|MESMO|XOU)$")   # operadores saem em maiúsculas; termo isolado igual a eles vai entre aspas
+
+
+def _tamanho_da_consulta(consulta_montada: str, grupos) -> tuple[int, int]:
+    """(grupos, termos) da consulta que o portal recebeu. Com `grupos`, conta os grupos informados; sem eles, conta os blocos
+    ligados por E. Termo = palavra ou frase entre aspas, fora operadores e parênteses."""
+    termos = [x for x in re.findall(r'"[^"]*"|[^\s()]+', str(consulta_montada or "")) if not _RE_OPERADOR_CONSULTA.match(x)]
+    if isinstance(grupos, list):
+        n_g = len([g for g in grupos if isinstance(g, (list, tuple)) and any(str(x).strip() for x in g)])
+    else:
+        n_g = len(re.split(r"\s+E\s+", str(consulta_montada or ""))) if consulta_montada else 0
+    return n_g, len(termos)
+
+
+def _dica_consulta_grande(mensagem, consulta_montada: str, grupos) -> str:
+    """Quando o portal recusa a busca com 'BRSResultSet.errWhenExecutingSearch' ou HTTP 500, diz o tamanho da consulta e manda reduzir.
+    Sem prometer limiar: em 12/10/2026 `servidor$ OU tribut$ OU compet$` em SÚMULAS foi recusado e `servidor$ OU tribut$` em acórdãos
+    funcionou; o gatilho exato não está provado."""
+    if not re.search(r"errWhenExecutingSearch|HTTP 500", str(mensagem or "")):
+        return ""
+    n_g, n_t = _tamanho_da_consulta(consulta_montada, grupos)
+    if not n_t:
+        return ""
+    return (f" O portal recusou uma consulta de {n_g} grupo(s) e {n_t} termo(s); consultas maiores falham com mais frequência, mas o "
+            "gatilho exato não está provado. Reduza os termos, use `grupos` ou divida em duas buscas e junte os resultados.")
+
+
+
 def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
     consulta = meta.get("consulta_montada", "")
     tipos = meta.get("tipos") or []
@@ -1717,10 +2038,10 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
     for a in meta.get("avisos") or []:
         linhas.append(f"⚠️ {a}")
 
-    if total > 3000 and pagina == 1:
+    if total >= 1000:   # porte do TJRO v1.35: a página é só o topo da ordenação
         linhas.append(
-            "Dica: total alto — restrinja com `E` (ex.: `\"dano moral\" E negativação`), com "
-            "`grupos`, com `[EMEN]` para buscar só na ementa, ou com filtro de órgão/relator/data."
+            f"⚠️ Consulta pouco seletiva ({total} documentos): a página mostra só o topo da ordenação, que não representa o conjunto. "
+            "Antes de concluir algo sobre ele, restrinja com `E`, `grupos`, `[EMEN]` (só na ementa) ou filtro de órgão, relator ou data."
         )
     _org = _fold((filtros or {}).get("orgao_julgador") or "")
     if "recursal" in _org and base == "trf1":
@@ -1767,14 +2088,17 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
             meta_l.append(f"Órgão: {d['orgao']}")
         if d.get("origem") and "PRIMEIRA REGI" not in d["origem"].upper():
             meta_l.append(f"Origem: {d['origem']}")
+        _rec = _dias_recente(d, meta.get("hoje"))
         if d.get("data_julgamento"):
-            meta_l.append(f"Julgamento: {d['data_julgamento']}")
+            meta_l.append(f"Julgamento: {d['data_julgamento']}" + (" 🆕" if _rec is not None else ""))
         if d.get("data_publicacao"):
             meta_l.append(f"Publicação: {d['data_publicacao']}")
         if d.get("fonte_publicacao"):
             meta_l.append(f"Fonte: {d['fonte_publicacao']}")
         linhas.append("  " + " · ".join(meta_l))
         linhas.append(f"  Citação: {_citacao_com_link(d)} — verificação: {_nivel_verificacao(d)}")
+        if _rec is not None:
+            linhas.append(f"  🆕 JULGADO RECENTE ({_rec} dia(s)): pode ainda não ter sido publicado e cabe embargos de declaração; confira a publicação antes de citar.")
         _vot = _votacao_do_documento(d)
         if _vot:
             linhas.append(f"  🗳️ Votação declarada no dispositivo: {_vot} (não diz quem foi o vencido; o voto vencido só se vê no inteiro teor)")
@@ -1789,6 +2113,11 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
             linhas.append(f"  {_lt}")
         if d.get("decisao"):
             linhas.append(f"  Dispositivo: {_trecho_centrado(d['decisao'], TRECHO_DECISAO)}")
+            _conj_d, _emb_d = _resultado_com_embargos(d["decisao"], d.get("classe") or "")
+            if _emb_d and _rotulo_do_conjunto(_conj_d, True) in ("ACOLHIDO", "PARCIAL"):
+                _fe = _frase_dos_embargos(d["decisao"])
+                if _fe:   # frase literal, não rótulo: o subtipo (erro material, omissão, efeito infringente) não se lê com segurança
+                    linhas.append(f"  ✏️ Embargos acolhidos, frase do dispositivo (literal, para ver se houve efeito infringente; não é rótulo): «{_fe}»")
         irmaos = por_numero.get(d["numero_digitos"], [])
         if len(irmaos) > 1 and irmaos[0] is d:
             desc = "; ".join(
@@ -1796,15 +2125,10 @@ def _format_busca(docs: list[dict], total: int, meta: dict) -> str:
                 for x in irmaos
             )
             linhas.append(f"  ⚠️ Mesmo número, {len(irmaos)} documentos nesta página: {desc} — cite pelo id + data, nunca só pelo número.")
-            for par in _OPOSTOS:
-                por_data: dict[str, set[str]] = {}
-                for x in irmaos:
-                    l = _lado_de(_resultado_de(x.get("decisao") or ""), par)
-                    if l:
-                        por_data.setdefault(x["data_julgamento"], set()).add(l)
-                for data, ls in por_data.items():
-                    if len(ls) > 1:
-                        linhas.append(f"  ⚠️ Documentos do julgamento de {data} declaram resultados opostos ({' × '.join(sorted(ls))}) — provável voto vencido ou decisão monocrática indexada; leia cada um.")
+            for av in _avisos_opostos(irmaos):
+                linhas.append(f"  {av}")
+            for av in _avisos_entre_julgamentos(irmaos):
+                linhas.append(f"  {av}")
         linhas.append(f"  {_nota_inteiro_teor(d)}")
 
     if houve_corte:
@@ -3144,6 +3468,7 @@ def _validar_fontes(fonte: list[str] | None) -> list[str]:
 async def _buscar(consulta: str, tipo, fonte, grupos, relator, orgao_julgador, classe, origem, numero,
                   ementa_decisao, referencia_legislativa, data_inicio, data_fim, tipo_data, pagina, por_pagina,
                   base: str = "trf1", tipo_acordao=None) -> str:
+    consulta_montada = ""
     try:
         base = _validar_base(base)
         tipos = _validar_tipos(tipo, base)
@@ -3182,13 +3507,13 @@ async def _buscar(consulta: str, tipo, fonte, grupos, relator, orgao_julgador, c
     except ValueError as e:
         return _erro_de_parametro(e)
     except PesquisaNaoRealizada as e:
-        return _carimbo_nao_realizada(e)
+        return _carimbo_nao_realizada(str(e).strip().rstrip(".") + _dica_consulta_grande(e, consulta_montada, grupos))
     except Exception as e:  # inesperado: também é pesquisa não realizada
         return _carimbo_nao_realizada(f"erro inesperado ({type(e).__name__}: {e})")
     meta = {"consulta_montada": consulta_montada, "tipos": tipos, "fontes": fontes, "pagina": pagina,
             "por_pagina": por_pagina, "filtros": avancados, "avisos": dados.get("avisos"), "base": base,
             "tipo_acordao": tipo_acordao_v}
-    return _format_busca(dados["docs"], dados["total"], meta)
+    return _limitar_saida_busca(_format_busca(dados["docs"], dados["total"], meta), pagina=pagina, por_pagina=por_pagina) + _linha_de_ritmo()
 
 
 def _filtrar_por_numero(docs: list[dict], digitos: str) -> list[dict]:
@@ -4398,6 +4723,160 @@ if __name__ == "__main__":
         _emlonga = "DIREITO X. I. CASO EM EXAME " + "texto do caso. " * 120 + "IV. DISPOSITIVO E TESE Recurso «provido». Tese de julgamento: 1. A tese «literal» do órgão."
         assert "literal" in _linha_tese_da_busca(_emlonga) and "«" not in _linha_tese_da_busca(_emlonga).split("«", 1)[1].split("»", 1)[0]
         assert _linha_tese_da_busca(_emt) == "" and _linha_tese_da_busca("") == ""
+        # --- v1.5.5: porte do TJRO v1.30–v1.37 ---
+        # 1) julgado recente (🆕): até 30 dias, pela data do índice ou do fecho
+        _h = date(2026, 10, 17)
+        assert _dias_recente({"data_julgamento": "10/10/2026"}, _h) == 7 and _dias_recente({"data_julgamento": "17/09/2026"}, _h) == 30
+        assert _dias_recente({"data_julgamento": "16/09/2026"}, _h) is None and _dias_recente({"data_julgamento": "20/10/2026"}, _h) is None
+        assert _dias_recente({"data_julgamento": "31/11/2026"}, _h) is None and _dias_recente({}, _h) is None
+        assert _dias_recente({"data_julgamento": "01/08/2026", "data_fecho": "10/10/2026"}, _h) == 7   # vale a menor distância
+        _rec = dict(d0, data_julgamento="10/10/2026", data_publicacao="")
+        _sr = _format_busca([_rec], 1, {"consulta_montada": "x", "pagina": 1, "por_pagina": 30, "base": "trf1", "hoje": _h})
+        assert "Julgamento: 10/10/2026 🆕" in _sr and "🆕 JULGADO RECENTE (7 dia(s)): pode ainda não ter sido publicado e cabe embargos de declaração" in _sr
+        assert "JULGADO RECENTE" not in _format_busca([_rec], 1, {"consulta_montada": "x", "pagina": 1, "por_pagina": 30, "base": "trf1", "hoje": date(2026, 12, 1)})
+        # 3) consulta pouco seletiva: a partir de 1.000 documentos, em qualquer página; abaixo disso, nada
+        _m1 = {"consulta_montada": "x", "pagina": 1, "por_pagina": 30, "base": "trf1"}
+        assert "Consulta pouco seletiva (1000 documentos)" in _format_busca([d0], 1000, _m1) and "pouco seletiva" not in _format_busca([d0], 999, _m1)
+        assert "pouco seletiva" in _format_busca([d0], 1500, dict(_m1, pagina=3))
+        # 5) rótulos: parcial nas duas ordens; "parcial" de embargos só quando é da oração dos embargos
+        for _t in ("A Turma, por unanimidade, deu parcial provimento à apelação.", "RECURSO PROVIDO PARCIALMENTE.", "apelação provida em parte",
+                   "A Turma, por unanimidade, deu provimento parcial à apelação.", "A TNU decidiu, por maioria, CONHECER e PROVER PARCIALMENTE o pedido."):
+            _c = _resultado_de(_t)
+            assert "PARCIAL" in _c and "PROVIDO" in _c and _rotulo_do_conjunto(_c) == "PARCIAL", (_t, _c)
+        for _t in ("A Turma, por unanimidade, negou provimento à apelação.", "A TNU decidiu CONHECER PARCIALMENTE do recurso e, nesse ponto, a ele NEGAR PROVIMENTO.",
+                   "A Turma deu provimento à apelação."):
+            assert "PARCIAL" not in _resultado_de(_t), _t
+        _ep = _resultado_de("A Turma, por unanimidade, acolheu parcialmente os embargos de declaração.")
+        assert {"ACOLHIDO", "PARCIAL"} <= _ep and _rotulo_do_conjunto(_ep, True) == "PARCIAL", _ep
+        assert "PARCIAL" in _resultado_de("Embargos de declaração parcialmente acolhidos.") and "PARCIAL" in _resultado_de("embargos de declaração acolhidos em parte")
+        _ei = _resultado_de("A Turma acolheu os embargos de declaração, para dar parcial provimento ao recurso.")
+        assert "ACOLHIDO" in _ei and "PARCIAL" not in _ei, _ei   # o parcial é do recurso, não dos embargos
+        assert "REJEITADO" in _resultado_de("negar provimento aos embargos de declaração") and "DESPROVIDO" not in _resultado_de("negar provimento aos embargos de declaração")
+        assert {"ACOLHIDO"} <= _resultado_de("dou provimento ao recurso", "EMBARGOS DE DECLARAÇÃO NA APELAÇÃO CIVEL (EDAC)") and "PROVIDO" not in _resultado_de("dou provimento ao recurso", "EMBARGOS DE DECLARAÇÃO CÍVEL (EDCIV)")
+        assert "REJEITADO" in _resultado_de("embargos NÃO acolhidos") and "ACOLHIDO" not in _resultado_de("embargos NÃO acolhidos")
+        assert "PROVIDO" in _resultado_de("embargos de terceiro: dar provimento ao recurso") and "ACOLHIDO" not in _resultado_de("embargos de terceiro: dar provimento ao recurso")
+        assert _rotulo_do_conjunto({"REJEITADO", "PROVIDO"}) == "PROVIDO" and _rotulo_do_conjunto({"REJEITADO", "PROVIDO"}, True) == "REJEITADO"   # preliminar rejeitada não torna ambíguo o mérito
+        assert _rotulo_do_conjunto({"PROVIDO", "DESPROVIDO"}) is None and _rotulo_do_conjunto({"ACOLHIDO", "REJEITADO"}, True) is None
+        _ra = _resumo_resultados_pagina([dict(d0, numero_digitos=str(i), decisao=t) for i, t in enumerate(["deu parcial provimento", "deu provimento", "negou provimento", "deu parcial provimento"])])
+        assert _ra["contagem"]["PARCIAL"] == 2 and _ra["contagem"]["PROVIDO"] == 1 and _ra["contagem"]["DESPROVIDO"] == 1, _ra
+        assert "parcial (provido ou acolhido em parte)" in _format_busca([dict(d0, numero_digitos=str(i), decisao="deu parcial provimento") for i in range(3)], 3, _m1)
+        # 4) resultados opostos no mesmo julgamento: embargos não se comparam com apelação; ACOLHIDO × REJEITADO só entre embargos; o aviso diz qual é qual
+        _ap = dict(d0, id="A1", tipo="Acórdão", classe="APELAÇÃO CIVEL (AC)", data_julgamento="01/02/2025", decisao="A Turma, por unanimidade, deu parcial provimento à apelação.")
+        _mo = dict(_ap, id="B2", tipo="Decisão Monocrática", decisao="Nego provimento ao recurso.")
+        _av = _avisos_opostos([_ap, _mo])
+        assert len(_av) == 1 and "id A1 (Acórdão): parcial (provido ou acolhido em parte)" in _av[0] and "id B2 (Decisão Monocrática): desprovido" in _av[0] and "01/02/2025" in _av[0], _av
+        _ed_r = dict(_ap, id="C3", classe="EMBARGOS DE DECLARAÇÃO NA APELAÇÃO CIVEL (EDAC)", decisao="A Turma, por unanimidade, rejeitou os embargos de declaração.")
+        assert _avisos_opostos([dict(_ap, decisao="A Turma deu provimento à apelação."), _ed_r]) == []   # apelação provida × embargos rejeitados: normal
+        _pa = dict(_ap, id="D4", decisao="A Turma acolheu a preliminar de ilegitimidade.")
+        _pr = dict(_ap, id="E5", decisao="A Turma rejeitou a preliminar de cerceamento.")
+        assert _avisos_opostos([_pa, _pr]) == []   # "preliminar acolhida × rejeitada" fora de embargos era falso alarme
+        _e1 = dict(_ed_r, id="F6", decisao="A Turma acolheu os embargos de declaração.")
+        _av2 = _avisos_opostos([_e1, _ed_r])
+        assert len(_av2) == 1 and "id F6 (Acórdão): acolhido" in _av2[0] and "id C3 (Acórdão): rejeitado" in _av2[0], _av2
+        assert _avisos_opostos([dict(_ap, data_julgamento=""), dict(_mo, data_julgamento="")]) == []   # sem data não se presume mesmo julgamento
+        _ent = dict(_ap, id="G7", data_julgamento="01/02/2024", decisao="A Turma deu provimento à apelação.")
+        _ent2 = dict(_ap, id="H8", data_julgamento="01/06/2025", decisao="A Turma negou provimento ao agravo interno.")
+        _ae = _avisos_entre_julgamentos([_ent, _ent2])
+        assert len(_ae) == 1 and "01/02/2024 (id G7): provido" in _ae[0] and "01/06/2025 (id H8): desprovido" in _ae[0], _ae
+        _ae2 = _avisos_entre_julgamentos([_ent, dict(_ed_r, data_julgamento="01/06/2025")])
+        assert _ae2 == [], _ae2   # embargos rejeitados depois da apelação provida: o normal, sem aviso
+        _ae3 = _avisos_entre_julgamentos([_ent, dict(_e1, data_julgamento="01/06/2025")])
+        assert len(_ae3) == 1 and "Embargos de declaração ACOLHIDOS em 01/06/2025 (id F6)" in _ae3[0], _ae3
+        assert "declaram resultados opostos: id A1" in _format_busca([_ap, _mo], 2, _m1)
+        # 6) embargos acolhidos: a frase literal do dispositivo, sem rótulo de subtipo
+        _fd = "Decide a Turma, por unanimidade, acolher os embargos de declaração para sanar omissão, nos termos do art. 1.022 do CPC. Desembargador Federal X Relator"
+        assert _frase_dos_embargos(_fd) == "Decide a Turma, por unanimidade, acolher os embargos de declaração para sanar omissão, nos termos do art. 1.022 do CPC.", _frase_dos_embargos(_fd)
+        assert _frase_dos_embargos("A Turma, por unanimidade, acolheu os embargos de declaração da parte autora e rejeitou embargos de declaração da União.").startswith("A Turma, por unanimidade, acolheu os embargos")
+        assert _frase_dos_embargos("Decide a Turma, por unanimidade, rejeitar os embargos de declaração.") == "" and _frase_dos_embargos("") == ""
+        assert len(_frase_dos_embargos("acolher os embargos de declaração " + "x " * 400)) <= 361
+        _sed = _format_busca([dict(_ap, classe="EMBARGOS DE DECLARAÇÃO NA APELAÇÃO CIVEL (EDAC)", decisao="A Turma, por unanimidade, acolheu os embargos de declaração.")], 1, _m1)
+        assert "✏️ Embargos acolhidos, frase do dispositivo (literal" in _sed and "«A Turma, por unanimidade, acolheu os embargos de declaração.»" in _sed, _sed
+        assert "✏️" not in _format_busca([_ed_r], 1, _m1) and "✏️" not in _format_busca([_ap], 1, _m1)
+        # 2) placar do limitador (só lê o estado; nenhuma requisição nova)
+        _limpar_estado()
+        assert "0 de 24 requisições" in _linha_de_ritmo() and "nível 1 de 5" in _linha_de_ritmo() and "todos os processos desta extensão nesta máquina" in _linha_de_ritmo()
+        _reservar_requisicao(); _reservar_requisicao()
+        _lr = _linha_de_ritmo()
+        assert "2 de 24 requisições na janela atual de 1min" in _lr, _lr
+        assert "2 de 24" in _linha_de_ritmo() and _ler_estado()["total_requisicoes"] == 2   # ler o placar não gasta requisição
+        _limpar_estado()
+        # 7) consulta grande recusada pelo portal: diz o tamanho, manda reduzir, sem prometer limiar
+        _dg = _dica_consulta_grande("o portal respondeu algo inesperado (esperava xml; veio HTTP 500, content-type='text/html')", "(a OU b) E (c OU d OU e)", [["a", "b"], ["c", "d", "e"]])
+        assert "2 grupo(s) e 5 termo(s)" in _dg and "use `grupos`" in _dg and "divida em duas buscas" in _dg and "não está provado" in _dg, _dg
+        assert "errWhenExecutingSearch" and "1 grupo(s) e 3 termo(s)" in _dica_consulta_grande("BRSResultSet.errWhenExecutingSearch", "servidor$ OU tribut$ OU compet$", None)
+        assert _dica_consulta_grande("falha de rede (ReadTimeout)", "a OU b", None) == "" and _dica_consulta_grande("disjuntor em pausa", "a", None) == ""
+        # 7/8/2) fluxo de _buscar com o portal simulado
+        _orig_cp = globals()["_consultar_portal"]
+
+        def _fake_ok(docs_, total_):
+            async def _f(*a, **k):
+                return {"docs": docs_, "total": total_, "avisos": []}
+            return _f
+
+        def _fake_erro(msg):
+            async def _f(*a, **k):
+                raise PesquisaNaoRealizada(msg)
+            return _f
+        try:
+            globals()["_consultar_portal"] = _fake_erro("o portal respondeu algo inesperado (esperava xml; veio HTTP 500, content-type='text/html')")
+            _e500 = asyncio.run(_buscar("", None, None, [["a", "b"], ["c"], ["d", "e", "f"]], None, None, None, None, None, None, None, None, None, "julgamento", 1, 30, "trf1", None))
+            assert _e500.startswith("[PESQUISA NÃO REALIZADA") and "3 grupo(s) e 6 termo(s)" in _e500 and "divida em duas buscas" in _e500, _e500
+            globals()["_consultar_portal"] = _fake_erro("falha de rede ao consultar o portal (ReadTimeout)")
+            assert "termo(s)" not in asyncio.run(_buscar("", None, None, [["a"], ["b"]], None, None, None, None, None, None, None, None, None, "julgamento", 1, 30, "trf1", None))
+            globals()["_consultar_portal"] = _fake_ok(docs, 25943)
+            _ok = asyncio.run(_buscar("dano moral", None, None, None, None, None, None, None, None, None, None, None, None, "julgamento", 1, 30, "trf1", None))
+            assert "Consulta pouco seletiva (25943 documentos)" in _ok and "_Ritmo do portal:" in _ok and "SAÍDA CORTADA" not in _ok
+            globals()["_consultar_portal"] = _fake_ok((docs + docs_p)[:50], 25943)
+            _gr = asyncio.run(_buscar("dano moral", None, None, None, None, None, None, None, None, None, None, None, None, "julgamento", 1, 50, "trf1", None))
+            assert "SAÍDA CORTADA:" in _gr and "resultados cabem aqui" in _gr and "por_pagina=10 e pagina=1" in _gr and "Próxima página" not in _gr, _gr[-900:]
+            assert _gr.rstrip().endswith("Se o seu roteiro tem teto por frente, conte as suas chamadas: este número só diz o fôlego do limitador._")
+            assert len(_gr) < _SAIDA_MAX_CHARS + 1500 and "Resumo desta página" in _gr and "**1. " in _gr
+            _kk = int(_gr.split("SAÍDA CORTADA: ", 1)[1].split(" de ", 1)[0])
+            assert f"**{_kk}. " in _gr and f"**{_kk + 1}. " not in _gr
+        finally:
+            globals()["_consultar_portal"] = _orig_cp
+            _limpar_estado()
+        assert _limitar_saida_busca("curto") == "curto"
+        _grande = "cab\n" + "".join(f"\n**{i}. Acórdão — x**\n  " + "y" * 3000 for i in range(1, 11)) + "\n\nResumo desta página: ok\nPróxima página: pagina=2"
+        _lg = _limitar_saida_busca(_grande, 10000, 1, 30)
+        assert "SAÍDA CORTADA: 3 de 10" in _lg and "Resumo desta página: ok" in _lg and "Próxima página" not in _lg and "**4. " not in _lg and "**3. " in _lg and len(_lg) <= 10000, _lg[-400:]
+        # 9) alertas que dizem ONDE
+        _rd = conferir(voto_tr, "afasta o benefício desde o primeiro dia", tribunal="TNU")
+        _ad = next(a for a in _rd["alertas"] if a.startswith("VOTO DIVERGENTE"))
+        assert "Essa parte começa assim: «Peço vênia para divergir do relator" in _ad, _ad
+        _tnu_v = ("Documento:1\nTIMBRE\nRELATOR : Juiz Federal FULANO DE TAL\nRELATÓRIO\nTrata-se de pedido de uniformização contra acórdão que negou o benefício assistencial.\n"
+                  "VOTO\nNego provimento ao pedido, pois a renda familiar supera o limite legal.\nassinado por FULANO DE TAL,\n"
+                  "Documento:2\nTIMBRE\nRELATOR : Juiz Federal FULANO DE TAL\nVOTO-VISTA\nPeço vênia ao relator para divergir, porque a renda per capita deve excluir os gastos com medicamentos de alto custo.\nassinado por BELTRANO SILVA,\n"
+                  "Documento:3\nTIMBRE\nRELATOR : Juiz Federal FULANO DE TAL\nACÓRDÃO\nA Turma Nacional de Uniformização decidiu, por maioria, negar provimento. Brasília, 10 de maio de 2025.\n")
+        _rv = conferir(_tnu_v, "a renda per capita deve excluir os gastos com medicamentos de alto custo", tribunal="TNU")
+        _av3 = next(a for a in _rv["alertas"] if a.startswith("VOTO DIVERGENTE"))
+        assert "Esse voto começa assim: «VOTO-VISTA Peço vênia ao relator para divergir" in _av3, _av3
+        _ob = "A sentença merece reforma. Ainda que assim não fosse, o benefício seria indevido porque a parte não comprovou a incapacidade laboral para o trabalho habitual."
+        _ao = next(a for a in conferir(_ob, "o benefício seria indevido porque a parte não comprovou a incapacidade laboral", tribunal="TNU")["alertas"] if a.startswith("OBITER"))
+        assert _ao.endswith("A frase: «Ainda que assim não fosse,» + o trecho."), _ao
+        _ao2 = next(a for a in conferir(_ob, "Ainda que assim não fosse, o benefício seria indevido porque a parte não comprovou", tribunal="TNU")["alertas"] if a.startswith("OBITER"))
+        assert _ao2.endswith("A marca está no começo do próprio trecho citado."), _ao2
+        # 10) FATOS DO JULGADO: o ÚLTIMO "caso em exame" fora de transcrição; relator vencido avisa
+        _p_ementa = "EMENTA. I. CASO EM EXAME Pedido de uniformização sobre o benefício assistencial do autor, com renda familiar discutida nos autos. II. QUESTÃO EM DISCUSSÃO Renda. IV. DISPOSITIVO E TESE Recurso provido."
+        _outra = ("Nesse sentido, transcrevo: EMENTA: I. CASO EM EXAME Ação previdenciária sobre aposentadoria rural de outra segurada, em processo diverso deste. "
+                  "II. QUESTÃO EM DISCUSSÃO Prova. IV. DISPOSITIVO E TESE Recurso desprovido. (TRF4, AC 5000000-00.2020.4.04.9999, Rel. Des. Fulano, julgado em 01/01/2021).")
+        _it2 = "VOTO\nNo caso dos autos, a renda familiar excede o limite. " + _outra + " Assim, aplico o precedente.\n" + _p_ementa
+        _f2 = _fatos_do_julgado(_it2)
+        assert _f2 and _f2[0] == "ementa › caso em exame" and _f2[1].startswith("Pedido de uniformização sobre o benefício assistencial"), _f2
+        assert _fatos_do_julgado(_p_ementa)[1].startswith("Pedido de uniformização") and _fatos_do_julgado(_it2.replace("(TRF4,", "(xx,")) is not None
+        _rel = "RELATÓRIO\nTrata-se de pedido de uniformização contra acórdão da turma recursal que negou o benefício assistencial ao autor idoso.\nVOTO\nNego provimento ao pedido.\n"
+        _venc = {"inteiro_teor_texto": _rel + "ACÓRDÃO\nA Turma Nacional de Uniformização decidiu, por maioria, vencido o relator, dar provimento ao pedido.", "relator_texto": "X", "relator_acordao_texto": ""}
+        assert "Relator VENCIDO: o voto que segue o relatório é o vencido" in _linha_fatos(_venc)
+        _venc2 = {"inteiro_teor_texto": _rel + "ACÓRDÃO\nA TNU decidiu, por maioria, dar provimento.", "relator_texto": "Juiz Federal FULANO", "relator_acordao_texto": "Juiz Federal BELTRANO"}
+        assert "relator do acórdão: Juiz Federal BELTRANO" in _linha_fatos(_venc2)
+        assert "VENCIDO" not in _linha_fatos({"inteiro_teor_texto": _rel + "ACÓRDÃO\nA TNU decidiu, por unanimidade, negar provimento.", "relator_texto": "Juiz Federal FULANO", "relator_acordao_texto": ""})
+        assert "VENCIDO" not in _linha_fatos(dict(_venc, inteiro_teor_texto=_p_ementa + " vencido o relator"))   # fatos da ementa do acórdão: nada a avisar
+        # 11) TESE DA EMENTA: corte acima de 1.000 caracteres igual ao lastIndexOf(". ", teto - 1) do Node (ponto em teto-1 entra; em teto fica de fora)
+        def _tese_pt(pos_ponto: int) -> str:   # "Frase um. " + a…a + ". " com o ponto da segunda frase no índice `pos_ponto` da tese
+            return ("I. CASO EM EXAME x. IV. DISPOSITIVO E TESE Recurso provido. Tese de julgamento: Frase um. " + "a" * (pos_ponto - 10) + ". " + "b" * 400)
+        _t1 = _tese_da_ementa(_tese_pt(_TESE_MAX - 1)); _t2 = _tese_da_ementa(_tese_pt(_TESE_MAX)); _t3 = _tese_da_ementa(_tese_pt(_TESE_MAX - 2))
+        assert len(_t1["texto"]) == _TESE_MAX and _t1["texto"].endswith("a.") and not _t1["completa"], len(_t1["texto"])   # ponto em teto-1: o Node (lastIndexOf) corta nele; o 1.5.4 caía em "Frase um."
+        assert _t2["texto"] == "Frase um." and len(_t3["texto"]) == _TESE_MAX - 1, (_t2["texto"][:20], len(_t3["texto"]))   # ponto em teto: fica de fora nos dois
         print("selftest offline OK")
 
         if "--online" in sys.argv:
